@@ -441,6 +441,12 @@ impl Daemon {
             Some(AgentKind::OpenCode) => {
                 hooks::opencode_plugin::install(&hooks::opencode_plugin::opencode_config_dir())
             }
+            // Antigravity reads hooks only from a customization root: one
+            // managed plugin in its global config dir (no trust prompt, and
+            // nothing written into the user's checked-in `.agents/`).
+            Some(AgentKind::Antigravity) => {
+                hooks::antigravity_plugin::install(&hooks::antigravity_plugin::gemini_config_dir())
+            }
             _ => Ok(()),
         };
         if let Err(e) = install_result {
@@ -599,8 +605,10 @@ impl Daemon {
         if cloud_task.is_some() {
             session.arm_cloud_scan();
         }
-        if agent.kind == AgentKind::Cursor {
-            session.arm_question_scan();
+        if let Some(kind) =
+            crate::pty::question::DialogKind::for_harness(agent.kind, harness.hook_dialect())
+        {
+            session.arm_question_scan(kind, true);
         }
         Ok(session)
     }

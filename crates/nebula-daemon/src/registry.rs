@@ -505,17 +505,15 @@ fn agent_spawn_command_with(
     }
     // Guidance (worktree rules, then the PR scope) rides the
     // system-prompt flag where one is mapped, folds into the first prompt
-    // where prepend is, and is dropped where neither is.
+    // where prepend is, and is dropped where neither is (Antigravity's
+    // arrives through its SessionStart hook instead).
     let mut initial_prompt = initial_prompt.map(str::to_string);
     if let Some(flag) = harness.system.append_flag.as_deref() {
         push_system_prompt(&mut args, flag, guidance, additional_system_prompt);
     } else if harness.system.prepend_to_first_prompt {
         let mut first = Vec::new();
         if guidance {
-            first.push(CLAUDE_WORKTREE_GUIDANCE.to_string());
-            first.push(crate::sibling::CLAUDE_SPAWN_GUIDANCE.to_string());
-            first.push(crate::sibling::CLAUDE_SESSION_CONTEXT_GUIDANCE.to_string());
-            first.push(crate::open_files::CLAUDE_OPEN_GUIDANCE.to_string());
+            first.extend(NEBULA_GUIDANCE.map(str::to_string));
         }
         if let Some(prompt) = additional_system_prompt {
             first.push(prompt.to_string());
@@ -540,6 +538,15 @@ fn agent_spawn_command_with(
     (program, args, resumed)
 }
 
+/// nebula's guidance blocks in the order every channel carries them:
+/// worktree, spawn, session context, then open.
+pub const NEBULA_GUIDANCE: [&str; 4] = [
+    CLAUDE_WORKTREE_GUIDANCE,
+    crate::sibling::CLAUDE_SPAWN_GUIDANCE,
+    crate::sibling::CLAUDE_SESSION_CONTEXT_GUIDANCE,
+    crate::open_files::CLAUDE_OPEN_GUIDANCE,
+];
+
 /// One system-prompt flag carrying nebula's guidance (worktree, spawn,
 /// then open) and whatever else the launch adds (the PR scope).
 fn push_system_prompt(
@@ -550,10 +557,7 @@ fn push_system_prompt(
 ) {
     let mut system_prompt = Vec::new();
     if guidance {
-        system_prompt.push(CLAUDE_WORKTREE_GUIDANCE);
-        system_prompt.push(crate::sibling::CLAUDE_SPAWN_GUIDANCE);
-        system_prompt.push(crate::sibling::CLAUDE_SESSION_CONTEXT_GUIDANCE);
-        system_prompt.push(crate::open_files::CLAUDE_OPEN_GUIDANCE);
+        system_prompt.extend(NEBULA_GUIDANCE);
     }
     if let Some(prompt) = additional {
         system_prompt.push(prompt);
@@ -1432,6 +1436,65 @@ mod tests {
                 .program,
             "agy"
         );
+    }
+
+    #[test]
+    fn antigravity_stays_interactive_and_resumes_only_the_requested_conversation() {
+        let harness = nebula_core::harness::builtin("antigravity").unwrap();
+        assert_eq!(
+            agent_spawn_command_with(&harness, None, None, None, None, None, None, None, false),
+            ("agy".into(), vec![], false)
+        );
+        let task = "fix the bug; keep $(this) literal\nwith a second line";
+        let (program, args, resumed) = agent_spawn_command_with(
+            &harness,
+            Some("conversation-id"),
+            Some(Path::new(TEST_CWD)),
+            Some("model-id"),
+            Some("high"),
+            None,
+            Some(task),
+            None,
+            false,
+        );
+        assert_eq!(program, "agy");
+        assert!(resumed);
+        assert_eq!(
+            args,
+            vec![
+                "--conversation",
+                "conversation-id",
+                "--model",
+                "model-id",
+                "--effort",
+                "high",
+                "--prompt-interactive",
+                task,
+            ]
+        );
+        assert_eq!(harness.hook_dialect(), Some(AgentKind::Antigravity));
+        assert_eq!(
+            harness.system_append_flag(),
+            None,
+            "guidance rides the hook"
+        );
+        assert_eq!(harness.permissions_flag, None);
+        assert!(harness.relocation_prompt);
+        // A cold quick prompt must submit a task without print mode or an
+        // implicit --continue (which could attach another card's session).
+        let (_, args, resumed) = agent_spawn_command_with(
+            &harness,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(task),
+            None,
+            false,
+        );
+        assert!(!resumed);
+        assert_eq!(args, vec!["--prompt-interactive", task]);
     }
 
     #[test]
@@ -2925,6 +2988,81 @@ mod tests {
                 recent_prompts: Vec::new(),
             })
             .unwrap();
+    }
+
+    /// A handoff from before dialog scanning recovers the scanner from
+    /// the agent row; a carried choice still wins over that row.
+    #[tokio::test]
+    async fn adopted_sessions_recover_missing_question_scanners() {
+        use crate::pty::question::DialogKind;
+
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "w", "/tmp", true);
+        for (index, (kind, carried_kind, expected)) in AgentKind::ALL
+            .iter()
+            .map(|&kind| {
+                let expected = match kind {
+                    AgentKind::Cursor => Some(DialogKind::CursorQuestion),
+                    AgentKind::Antigravity => Some(DialogKind::AntigravityPermission),
+                    _ => None,
+                };
+                (kind, None, expected)
+            })
+            .chain([(
+                AgentKind::Antigravity,
+                Some(DialogKind::CursorQuestion),
+                Some(DialogKind::CursorQuestion),
+            )])
+            .enumerate()
+        {
+            let id = format!("restored-{index}");
+            seed_agent(&daemon, &id, "w", None);
+            let mut agent = daemon
+                .store
+                .get_agent(&AgentId(id.clone()))
+                .unwrap()
+                .unwrap();
+            daemon.store.delete_agent(&agent.id).unwrap();
+            agent.kind = kind;
+            daemon.store.insert_agent(&agent).unwrap();
+            let pair = portable_pty::native_pty_system()
+                .openpty(portable_pty::PtySize::default())
+                .unwrap();
+            // Give adopt its own fd, as exec would; the slave stays open
+            // so the reader waits while we inspect the restored session.
+            let fd = unsafe { nix::libc::dup(pair.master.as_raw_fd().unwrap()) };
+            assert!(fd >= 0);
+            let sref = SessionRef::Agent(agent.id);
+            assert_eq!(
+                daemon.adopt_sessions(vec![crate::handoff::CarriedSession {
+                    pty: crate::pty::Carried {
+                        sref: sref.clone(),
+                        master_fd: fd,
+                        pid: std::process::id(),
+                        size: (120, 40),
+                        ring_start_seq: 0,
+                        ring: Vec::new(),
+                        kitty_stack: Vec::new(),
+                        bracketed_paste: false,
+                        progress_busy: None,
+                        title: None,
+                        cloud_scan: false,
+                        question_scan: carried_kind,
+                    },
+                    spare: false,
+                    launching: false,
+                }]),
+                1
+            );
+            let session = daemon.session(&sref).unwrap();
+            assert_eq!(
+                session.carry().unwrap().unwrap().question_scan,
+                expected,
+                "{kind:?} with carried {carried_kind:?}"
+            );
+            session.uncarry();
+        }
     }
 
     fn agent_worktree(daemon: &Daemon, id: &str) -> String {

@@ -121,7 +121,7 @@
   sweep leave that terminal alone, and a run that exits on its own keeps its PTY, so an attach replays
   the ending instead of respawning — a command starts only when you pick **Run**. `Shift+Enter` (or `Shift+O`) runs `open`
   once, from the TUI. See [Configuration](configuration.md#the-project-file-nebulajson).
-- **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, or a custom registry program.** Creating an agent (`n`) first asks which CLI to
+- **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, `agy`, or a custom registry program.** Creating an agent (`n`) first asks which CLI to
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree. Claude's picker can also dispatch a one-shot Cloud task as
   `claude --cloud=<task>`; because Claude accepts that description as a process argument, don't put
   secrets in the Cloud task. That CLI prints the new session's id and exits, and the DAEMON reads the
@@ -131,7 +131,7 @@
   `codex resume <session-id>` / `cursor-agent --resume <session-id>` (falling back to a fresh session
   when the old one is gone) / `pi --session-id <session-id>` (which creates a missing id instead of
   dying) / `opencode --session <session-id>` / `grok --resume <session-id>` (nebula does not capture
-  Grok's id yet, so there is rarely one to resume); `muse` always boots fresh (no resume flag mapped yet). A session's id is saved only once a turn has run in it — the CLI writes the transcript a
+  Grok's id yet, so there is rarely one to resume) / `agy --conversation <conversation-id>`; `muse` always boots fresh (no resume flag mapped yet). A session's id is saved only once a turn has run in it — the CLI writes the transcript a
   resume reads on the first prompt — so a CLI booted and never used resumes as nothing. Claude
   ids are checked against the transcripts on disk before the spawn, and one with none boots fresh;
   any resume that exits with an error within 10 s of its spawn is respawned fresh, unless its Claude
@@ -221,7 +221,19 @@
   `permission.replied` → the gated tool's `PostToolUse` (the one hook an approval fires), and the
   `question` tool's `question.asked` / `question.replied` → `PreToolUse` / `PostToolUse`. A subagent
   session's prompts post under the root session's id with the child as the origin, so its answer is its
-  own next tool event. The file is env-guarded like pi's.
+  own next tool event. The file is env-guarded like pi's. Antigravity reads `hooks.json` only from a
+  customization root, so nebula writes one managed agy plugin into its global config dir
+  (`~/.gemini/config/plugins/nebula/` — loaded with no trust prompt, nothing written into a checked-in
+  `.agents/`) whose env-guarded hooks POST agy's own payloads: `SessionStart` (its reply injects nebula's
+  guidance as a system message, agy having no system-prompt flag), a turn's first `PreInvocation` →
+  `UserPromptSubmit` (`invocationNum` restarts at 0 every turn), and `Stop`. agy fires no hook for its
+  permission prompts (a `PreToolUse` reply would have to decide them), so they are read off the screen
+  the way Cursor's question dialog is: each dialog's headline (`Requesting permission`, `Accept this
+  file edit?`, `Allow access to this file?`, `Do you want to proceed?`, the trust prompt a fresh
+  checkout raises) with the `↑/↓ Navigate ·` legend of its menu close below it turns the session red,
+  and both gone for 150 ms turns it back — re-checked on a timer, since agy can erase a dialog and
+  then sit silent. The pair, and the distance, because agy leaves a stale headline behind once the
+  menu is answered, and shows the same legend under its pickers.
 - **Sessions title themselves.** Create a session with the default name and the agent renames it after
   your first prompt — a 3-4 word title describing the ask (e.g. `Fix Login Redirect`), via a
   `nebula rename <title>` command the CLI runs in its own turn (no extra API calls, no MCP server).
@@ -229,7 +241,8 @@
   `hookSpecificOutput.additionalContext`, the one envelope both read (the daemon sends it only while the
   session is untitled) — Pi's extension reads the same envelope and appends it to that run's system
   prompt, and OpenCode's plugin carries it into the turn's system prompt through OpenCode's
-  system-transform hook; Cursor gets a managed `.cursor/rules/nebula-title.mdc` project rule instead,
+  system-transform hook, and Antigravity's plugin answers the turn's first `PreInvocation` with it as a
+  one-turn message; Cursor gets a managed `.cursor/rules/nebula-title.mdc` project rule instead,
   since its hooks can't inject context. Titling is one-shot and never clobbers a name you typed or set
   with `r` — a late agent attempt is politely declined. `nebula rename --force` overrides.
 - **A Claude session's own name and its row stay tied.** `/rename <name>` inside Claude Code retitles
@@ -252,8 +265,9 @@
   Built-in Claude only; a row on an exact id (a Bedrock id from `claude_models`) keeps it while
   Claude stays in that family.
 - **Cards show what they were last asked.** The `prompt` field of the `UserPromptSubmit` payload —
-  which every hooked harness sends — is condensed to one line in the hook receiver, kept on the AGENT
-  row (the newest ten, in SQLite), and the newest is drawn on the session's card with an ago label.
+  or, for Antigravity, the latest user request in its transcript (only the regular `transcript.jsonl`
+  under the hook's own conversation id, tail-read within 50 ms) — is condensed to one line in the
+  hook receiver, kept on the AGENT row (the newest ten, in SQLite), and the newest is drawn on the session's card with an ago label.
   Pure capture: nothing is injected into the
   model's context and no extra turn runs. See [Sessions](sessions.md#recent-prompts).
 - **The header counts what is waiting on the repo.** The GRID's header says
@@ -274,7 +288,9 @@
   worktree, opening with a note saying where it now runs, so the conversation carries on there without
   you typing anything. Claude learns the rule from a short `--append-system-prompt` nebula passes at
   spawn, plus a `Bash(nebula worktree:*)` permission so the command never prompts; Pi gets the same
-  appended prompt and reopens on the same note, and Grok Build gets it through `--rules`. Codex, Cursor, Muse and OpenCode have no system-prompt flag to learn
+  appended prompt and reopens on the same note, Grok Build gets it through `--rules`, and Antigravity
+  through its plugin's `SessionStart` system message (it reopens with `--conversation <id>
+  --prompt-interactive "<note>"`, which submits the note). Codex, Cursor, Muse and OpenCode have no system-prompt flag to learn
   the rule from, but run the same command when you ask. Codex then reopens on the same note —
   `codex resume <id> --cd <worktree> "<note>"`, the `--cd` because Codex otherwise reopens a resumed
   session in the directory its transcript recorded, the old checkout. Cursor and OpenCode resume silent
@@ -283,7 +299,7 @@
   directory it was started in.
 - **Ask the agent for another session and it starts one.** Tell a Claude session "start a new nebula
   session that fixes the login redirect" and it runs `nebula spawn "<task>"`: the daemon starts a second
-  agent beside it — same worktree, same harness, model and effort unless `--kind claude|codex|cursor|pi|muse|grok|opencode`
+  agent beside it — same worktree, same harness, model and effort unless `--kind claude|codex|cursor|pi|muse|grok|opencode|antigravity`
   names another — opening on that task as its first prompt, so it is working before you look. The new
   card appears on the grid on its own (default name, so it titles itself), and the session you
   asked from is untouched: no restart, no focus change. Ask for that separate session "on branch

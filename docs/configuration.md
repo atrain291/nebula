@@ -37,7 +37,7 @@ and leaves everything else in the JSON untouched, so hand-written fields survive
 [Compatibility rules](#compatibility-rules) for why.
 
 Files beside it in the DATA DIR: `nebula.db` (the SQLITE STORE), `config.local.json` (above),
-`agent_presets.json` (AGENT PRESETS), `cursor_models.json` (the cached `cursor-agent --list-models` answer, refreshed after 24h),
+`agent_presets.json` (AGENT PRESETS), `cursor_models.json` and `antigravity_models.json` (the cached `cursor-agent --list-models` and `agy models` answers, refreshed after 24h),
 `ssh_hosts.json` (the SSH HOSTS FILE), `reviewed.json` (REVIEWED MARKS). All but the database are
 convenience stores: missing or malformed reads as empty.
 
@@ -47,7 +47,7 @@ Sixty-five keys. **Overlay** is the SETTINGS OVERLAY tab whose row edits the key
 exists only in the file, so it is hand-edit-only. Most rows toggle or cycle on `Enter` / `←` / `→`; a
 *typed* row (`worktree_base_branch`, the Project tab's **Run command**) opens a one-line prompt on
 `Enter` instead, pre-filled with the stored value, and an empty answer puts its default back. The Agents tab groups its rows under **Quick
-prompt**, **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build** and **OpenCode** headers, so a harness's rows read `Enabled` / `Model` /
+prompt**, **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, **OpenCode** and **Antigravity** headers, so a harness's rows read `Enabled` / `Model` /
 `Effort` under its name rather than repeating it. The **Project** tab is the one tab whose rows are
 not nebula's but one project's: the project the grid is scoped to, named with its path on
 the tab's first line, and each row there reads and writes that project's own entry under `projects`
@@ -99,7 +99,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `confirm_drag_move` | bool | `true` | Sessions | CONFIRM DRAG MOVE: a session card dragged onto another worktree's band or another PROJECT TAB asks before the session moves (the move restarts its CLI there, resumed on the same conversation). Off, the drop moves it at once. The MOVE PICKER (`m`) never asks. See [Keys](keys.md). |
 | `remember_harness` | bool | `false` | Experimental | REMEMBER HARNESS: a launch walked through the NEW SESSION PICKER (`n`), the PR SESSION picker or the QUICK PROMPT's `Tab` picker makes its harness the default the next launch starts on — the picker opens on that row and `p` launches it — and a model or effort drilled into through the submenus becomes that harness's own Model / Effort default. It writes the Agents tab's own rows (`quick_prompt_kind`, `<kind>_model`, `<kind>_effort`), so the tab always shows what the next launch will be; a pick that already is the default writes nothing, and an AGENT PRESET launch changes nothing, its harness being the preset's. Off, a pick is one session's: the NEW SESSION PICKER keeps opening on the `quick_prompt_kind` harness and the PR SESSION picker on its first row. See [Sessions](sessions.md#the-new-session-picker). |
 | `pr_issue_counts` | bool | `true` | — (retired) | Through 0.37, **PR & issue counts** (Settings → Experimental): off, the GRID's header dropped the `3 prs · 2 issues` beside the session count and the other projects' issues were never swept. The header always counts now — what is waiting on a repo is read off it without opening `v` or `i`, a click on either count opens that list, a count is left out until its list has landed, and a list cut off at the fetch cap counts `100+` — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older nebula sharing the file ([Compatibility rules](#compatibility-rules)). |
-| `quick_prompt_kind` | string | `"claude"` | Agents | Which AGENT KIND the QUICK PROMPT (`p`) launches: `claude`, `codex`, `cursor`, `pi`, `muse`, `grok` or `opencode`. Its model and effort come from that kind's own defaults below, so this is one name, not a third pair. A kind switched off here is stepped around. The NEW SESSION PICKER opens on it too, and with **Remember harness** on (Experimental) every picker-walked launch rewrites it. |
+| `quick_prompt_kind` | string | `"claude"` | Agents | Which AGENT KIND the QUICK PROMPT (`p`) launches: `claude`, `codex`, `cursor`, `pi`, `muse`, `grok`, `opencode` or `antigravity`. Its model and effort come from that kind's own defaults below, so this is one name, not a third pair. A kind switched off here is stepped around. The NEW SESSION PICKER opens on it too, and with **Remember harness** on (Experimental) every picker-walked launch rewrites it. |
 | `quick_prompt_focus` | bool | `false` | Agents | QUICK PROMPT FOCUS: whether a QUICK PROMPT launch enters and locks the new session's TERMINAL PANE. Off, the keys stay on the grid, and where the cursor goes is `follow_new_session`'s. On, it outranks that key: a launch that enters the new session's pane has to go there. Only the QUICK PROMPT reads it — every other launch takes the pane. |
 | `follow_new_session` | bool | `true` | Agents | FOLLOW NEW SESSION (**Follow new**): a QUICK PROMPT launch lands the cursor on the new session's card — the grid scrolls to keep it on screen and the pane shows it, the keys still on the grid — so a run of launches can be watched going up. It selects the card and no more: entering its terminal is `quick_prompt_focus`'s. It covers every QUICK PROMPT: `p`, `n`'s box, `Shift+P` on a card, and the boxes the ISSUES MODAL and the PULL REQUESTS MODAL open. Off, the cursor, the pane and the keys stay on the card you were on while the new session's card goes up in its band — first in it, stand-in rows first for a launch that cuts a fresh worktree — and the footer names the branch it went to (`started a session in feat`): the BACKGROUND LAUNCH's stillness, in the project on screen. A launch with no card under the cursor — the aim let go with `Esc`, an empty band, an empty grid — has nothing to keep and lands on its new card either way; so does every launch while `quick_prompt_focus` is on. Terminals (`t`) always come up in the pane. |
 | `quick_prompt_new_worktree` | bool | `false` | Agents | QUICK PROMPT NEW WORKTREE: whether each new QUICK PROMPT starts aimed at a fresh worktree (a random branch off the **Worktree base branch**) instead of the checkout under the grid's cursor. `Ctrl+N` in the box flips only that box; the next one starts from this again. Off by default, so `p` starts in the checkout under the cursor — the worktree whose band is selected, or the one the grid is inside — and on the project's root branch with nothing selected (`Esc` off the band). |
@@ -122,8 +122,8 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `muse_model` | string | `"default"` | Agents | Default `--model` for new Muse sessions. Any model id passes through verbatim; `"default"` means don't pass the flag. |
 | `muse_effort` | string | `"default"` | Agents | Reserved until the `muse` CLI documents a reasoning flag. Stored, never sent. |
 | `opencode_model` | string | `"default"` | Agents | Default `--model` for new OpenCode sessions: a `provider/model` id passed verbatim (`opencode models` lists what your machine has credentials for). The overlay lists a few well-known ids (`opencode/big-pickle`, `anthropic/claude-sonnet-5`, …); a hand-edited one passes through. `"default"` means don't pass the flag, so OpenCode opens on its own last-picked model. There is no `opencode_effort`: OpenCode has no effort flag (reasoning is a per-model variant picked inside its TUI), so its Agents section has no Effort row. |
-| `custom_harnesses` | array | `[]` | Agents | Extra CLIs the NEW SESSION PICKER offers after the built-ins, each with its own Agents tab section (Enabled and Model rows). Each entry is `{id, program}` plus options: `label` (picker text, defaults to the id), `enabled` (default `true`), `model` (default `"default"` = the CLI's pick, else passed verbatim), `model_flag` (default `"--model"`), and `hooks` (a built-in dialect the program speaks: `claude`, `codex`, `cursor`, `pi` or `opencode` — with one set the sessions report status, prompts and permission waits exactly like that harness, including title sync and auto-title for `claude`; without one they stay process-based, running while the PTY is live and never waiting-on-you). Ids use lowercase letters, digits and hyphens and must not collide with a built-in. Legacy: new harnesses belong in `harnesses`, where they also gain resume, effort, system-prompt and hook-dialect rows. Invalid entries never launch — the picker hides them and the daemon refuses them with the reason. |
-| `harnesses` | object | `{}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Pi, Muse, Grok Build, OpenCode), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the `n` picker, `e` presets, spawn, resume and hooks all read the merged rows. A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `nebula config harnesses` to print the effective rows to copy from. |
+| `custom_harnesses` | array | `[]` | Agents | Extra CLIs the NEW SESSION PICKER offers after the built-ins, each with its own Agents tab section (Enabled and Model rows). Each entry is `{id, program}` plus options: `label` (picker text, defaults to the id), `enabled` (default `true`), `model` (default `"default"` = the CLI's pick, else passed verbatim), `model_flag` (default `"--model"`), and `hooks` (a built-in dialect the program speaks: `claude`, `codex`, `cursor`, `pi`, `opencode` or `antigravity` — with one set the sessions report status, prompts and permission waits exactly like that harness, including title sync and auto-title for `claude`; without one they stay process-based, running while the PTY is live and never waiting-on-you). Ids use lowercase letters, digits and hyphens and must not collide with a built-in. Legacy: new harnesses belong in `harnesses`, where they also gain resume, effort, system-prompt and hook-dialect rows. Invalid entries never launch — the picker hides them and the daemon refuses them with the reason. |
+| `harnesses` | object | `{}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Pi, Muse, Grok Build, OpenCode, Antigravity), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the `n` picker, `e` presets, spawn, resume and hooks all read the merged rows. A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `nebula config harnesses` to print the effective rows to copy from. |
 | `keybindings` | object | `{}` | Hotkeys | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "ctrl+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. Only rows that differ from the defaults are written. |
 | `prewarm_agents` | bool | `true` | Sessions | DAEMON-owned PREWARM POOL: keep one booted agent CLI standing by in the selected WORKTREE, so creating a session there adopts it and feels instant. **Costs one idle CLI process per warm slot** (150–300 MB each, up to 15 minutes), and that spare is a real session as far as the CLI is concerned — Claude's own `/list-agents` lists it beside the sessions you made, named after the directory (`my-repo-3f`), and the memory modal (`Shift+M`) groups it under **warm spares**. Off drains the pool on the DAEMON's next sweep (within 30 s). |
 | `prewarm_sessions` | bool | `true` | Sessions | DAEMON-owned SESSION PREWARM: boot a WORKTREE's dead sessions when your selection rests on it, so attaching shows an already-booted screen instead of a booting shell. **Costs idle shell/CLI processes for sessions you may never open.** Off — for a machine with less memory to spare — landing on a worktree boots nothing: a session forks only when your cursor lands on its row or you attach to it, one at a time; sessions already up stay until the IDLE REAPER takes them. |
@@ -149,7 +149,7 @@ is what bounds the cost of both when they are left on.
 
 ### The harness registry
 
-The seven known harnesses ship compiled in, and `harnesses` edits them per field — or adds a new
+The eight known harnesses ship compiled in, and `harnesses` edits them per field — or adds a new
 CLI outright. Only your deltas go in the file; `nebula config harnesses` prints the effective rows
 to copy from. Disabling one is one line, and adding a CLI is one block: picker, presets, spawn,
 resume, hooks and the Agents tab section all follow, with no rebuild.
@@ -458,3 +458,40 @@ PTY (and scrubbed from plain terminals) so hooks can reach the HOOK RECEIVER —
 set yourself. `NEBULA_IMPORT_BUNDLE` is likewise set *by* `nebula ssh` and `nebula tunnel` in the
 remote command: the SETTINGS BUNDLE the remote nebula merges at startup and removes from its
 environment before it starts anything. For all of these, empty and unset mean the same thing: use the default.
+
+### Antigravity
+
+The built-in `antigravity` harness launches `agy` (the terminal CLI). Its model defaults
+come from the CLI unless overridden. For example:
+
+```json
+{
+  "harnesses": {
+    "antigravity": {
+      "enabled": true,
+      "effort_default": "high"
+    }
+  }
+}
+```
+
+The model picker loads IDs from `agy models`, cached in `antigravity_models.json` in
+Nebula's data directory for one day and refreshed in the background. Until a catalogue
+is available it offers `default`; `model_default` can also be set to a model ID directly.
+The built-in effort choices for agy 1.4.2 are `default`, `low`, `medium`, `high`,
+`xhigh`, and `max`; availability depends on the selected model.
+A custom installation path can be supplied with `program`. Initial tasks use
+`--prompt-interactive`; permissions remain governed by Antigravity's own settings.
+Status comes from a managed agy plugin nebula writes to `~/.gemini/config/plugins/nebula/`
+(global, so no trust prompt and nothing in your checked-in `.agents/`): `PreInvocation`
+at a turn's start marks the session running, `Stop` marks it idle, and the conversation
+ID is captured so a restored session resumes via `--conversation`, never implicit
+`--continue`. The plugin's `SessionStart` reply injects nebula's guidance (worktrees,
+`nebula spawn`, sessions, `nebula open`) as a system message, and a turn's first
+`PreInvocation` carries the auto-title instruction while the session is untitled. The
+hooks are env-guarded, so an `agy` run outside nebula loads the plugin and does nothing.
+agy has no hook for its permission prompts, so nebula reads them off the session's screen
+instead: the session goes red while a command or tool permission prompt, a file-edit review or
+the trust dialog of a fresh checkout is up, and back to running once it is answered.
+On resume, `--prompt-interactive` submits the relocation notice to that conversation.
+The built-in ID is `antigravity`, leaving existing custom `agy` entries intact.
