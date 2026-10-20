@@ -57,6 +57,8 @@ fn main() -> Result<()> {
         Some(Command::Open { files }) => nebula_tui::run_open(files),
         Some(Command::Sessions { json }) => nebula_tui::run_sessions(json),
         Some(Command::Read { session, lines }) => nebula_tui::run_read_session(&session, lines),
+        Some(Command::Archive { sessions }) => nebula_tui::run_archive(&sessions),
+        Some(Command::Unarchive { sessions }) => nebula_tui::run_unarchive(&sessions),
         Some(Command::Ask {
             session,
             question,

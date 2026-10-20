@@ -518,6 +518,171 @@ pub async fn list_sessions(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `nebula archive <session>...`: archive agent sessions by id or name,
+/// as `a` does in the TUI (the PTY is killed, the row is kept and `u`
+/// brings it back). Every target resolves before any is archived, so a
+/// typo archives nothing, and the session this runs inside is refused.
+pub async fn archive_sessions(targets: &[String]) -> Result<()> {
+    let mut conn = session_context_connection("archive").await?;
+    let caller = env::non_empty(env::AGENT_ID);
+    archive_over(&mut conn, targets, caller.as_deref()).await
+}
+
+/// [`archive_sessions`] past the connect, with the calling session's id
+/// passed in rather than read from the environment, so tests can drive it.
+async fn archive_over(
+    conn: &mut Connection,
+    targets: &[String],
+    caller: Option<&str>,
+) -> Result<()> {
+    let sessions = fetch_sessions(conn).await?;
+    let mut picked: Vec<&SessionSummary> = Vec::new();
+    for target in targets {
+        let session = resolve_archive_target(&sessions, target)?;
+        if caller == Some(session.id.as_str()) {
+            bail!("{target} is the session running this command; archive it from the TUI");
+        }
+        if !picked.iter().any(|p| p.id == session.id) {
+            picked.push(session);
+        }
+    }
+    for session in picked {
+        let SessionRef::Agent(id) = &session.session else {
+            unreachable!("resolve_archive_target only returns agent sessions");
+        };
+        let req_id = ONE_SHOT_REQ_ID;
+        write_frame(
+            &mut conn.stream,
+            &ClientRequest::ArchiveAgent {
+                req_id,
+                id: id.clone(),
+            },
+        )
+        .await?;
+        match await_reply(conn, req_id).await? {
+            Reply::Ack => println!("archived {} ({})", session.name, session.id),
+            Reply::Error(message) => bail!("archive {}: {message}", session.name),
+        }
+    }
+    Ok(())
+}
+
+/// One agent session for `nebula archive`: an exact id or name, else the
+/// one whose id or name contains `raw` (case-insensitive). Unlike `read`,
+/// project and branch never match — a project name would hit every
+/// session in it.
+fn resolve_archive_target<'a>(
+    sessions: &'a [SessionSummary],
+    raw: &str,
+) -> Result<&'a SessionSummary> {
+    let agents: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| matches!(s.session, SessionRef::Agent(_)))
+        .collect();
+    resolve_by_id_or_name(&agents, raw, "agent session", |s| (&s.id, &s.name))
+}
+
+/// The matching rule `nebula archive` and `nebula unarchive` share over
+/// their candidate rows: an exact id or name, else the one row whose id or
+/// name contains `raw` (case-insensitive); several matches are an error
+/// naming them.
+fn resolve_by_id_or_name<'a, T>(
+    rows: &[&'a T],
+    raw: &str,
+    what: &str,
+    id_name: impl Fn(&T) -> (&str, &str),
+) -> Result<&'a T> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        bail!("session name or id is empty");
+    }
+    let pick = |found: Vec<&'a T>| -> Option<Result<&'a T>> {
+        match found.as_slice() {
+            [] => None,
+            [one] => Some(Ok(*one)),
+            many => Some(Err(anyhow::anyhow!(
+                "{raw} matches {} sessions ({}); use an id",
+                many.len(),
+                many.iter()
+                    .map(|row| {
+                        let (id, name) = id_name(row);
+                        format!("{id} {name}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
+    };
+    let exact = rows
+        .iter()
+        .copied()
+        .filter(|row| {
+            let (id, name) = id_name(row);
+            id.eq_ignore_ascii_case(raw) || name.eq_ignore_ascii_case(raw)
+        })
+        .collect();
+    if let Some(result) = pick(exact) {
+        return result;
+    }
+    let needle = raw.to_ascii_lowercase();
+    let fuzzy = rows
+        .iter()
+        .copied()
+        .filter(|row| {
+            let (id, name) = id_name(row);
+            id.to_ascii_lowercase().contains(&needle) || name.to_ascii_lowercase().contains(&needle)
+        })
+        .collect();
+    pick(fuzzy).unwrap_or_else(|| bail!("no {what} matches {raw}"))
+}
+
+/// `nebula unarchive <session>...`: bring archived agent sessions back, as
+/// `u` does in the TUI's archive view. `nebula sessions` lists live rows
+/// only, so names resolve against the daemon's full snapshot, archived
+/// agents alone. Every target resolves before any is restored.
+pub async fn unarchive_sessions(targets: &[String]) -> Result<()> {
+    let mut conn = session_context_connection("unarchive").await?;
+    unarchive_over(&mut conn, targets).await
+}
+
+/// [`unarchive_sessions`] past the connect, so tests can drive it.
+async fn unarchive_over(conn: &mut Connection, targets: &[String]) -> Result<()> {
+    write_frame(&mut conn.stream, &ClientRequest::Subscribe).await?;
+    let agents = loop {
+        match read_frame::<ServerEvent, _>(&mut conn.stream).await? {
+            Some(ServerEvent::Snapshot { agents, .. }) => break agents,
+            Some(_) => continue,
+            None => bail!("daemon closed the connection before sending a snapshot"),
+        }
+    };
+    let archived: Vec<&Agent> = agents.iter().filter(|a| a.archived).collect();
+    let mut picked: Vec<&Agent> = Vec::new();
+    for target in targets {
+        let agent = resolve_by_id_or_name(&archived, target, "archived session", |a| {
+            (&a.id.0, &a.name)
+        })?;
+        if !picked.iter().any(|p| p.id == agent.id) {
+            picked.push(agent);
+        }
+    }
+    for agent in picked {
+        let req_id = ONE_SHOT_REQ_ID;
+        write_frame(
+            &mut conn.stream,
+            &ClientRequest::UnarchiveAgent {
+                req_id,
+                id: agent.id.clone(),
+            },
+        )
+        .await?;
+        match await_reply(conn, req_id).await? {
+            Reply::Ack => println!("unarchived {} ({})", agent.name, agent.id),
+            Reply::Error(message) => bail!("unarchive {}: {message}", agent.name),
+        }
+    }
+    Ok(())
+}
+
 pub async fn read_session(session: &str, lines: u32) -> Result<()> {
     let mut conn = session_context_connection("read").await?;
     let req_id = ONE_SHOT_REQ_ID;
@@ -1207,6 +1372,261 @@ fn send_signal(pid: i32, sig: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn summary(session: SessionRef, id: &str, name: &str, project: &str) -> SessionSummary {
+        SessionSummary {
+            session,
+            id: id.into(),
+            name: name.into(),
+            project_id: ProjectId("p".into()),
+            project: project.into(),
+            worktree_id: WorktreeId("w".into()),
+            worktree: "/tmp/p".into(),
+            branch: "main".into(),
+            harness: "codex".into(),
+            status: "idle".into(),
+            alive: true,
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn archive_targets_resolve_by_id_or_name_never_project() {
+        let agent = |id: &str| SessionRef::Agent(AgentId(id.into()));
+        let rows = vec![
+            summary(agent("01A"), "01A", "agent-1", "nebula"),
+            summary(agent("01B"), "01B", "agent-12", "nebula"),
+            summary(
+                agent("01C"),
+                "01C",
+                "Review Question Scanner Diff",
+                "nebula",
+            ),
+            summary(
+                SessionRef::Terminal(TerminalId("t1".into())),
+                "t1",
+                "shell",
+                "nebula",
+            ),
+        ];
+        let id = |raw: &str| resolve_archive_target(&rows, raw).map(|s| s.id.clone());
+        // An exact name wins over the longer name it is part of.
+        assert_eq!(id("agent-1").unwrap(), "01A");
+        assert_eq!(id("01b").unwrap(), "01B");
+        assert_eq!(id("question scanner").unwrap(), "01C");
+        let err = id("agent").unwrap_err().to_string();
+        assert!(err.contains("matches 2 sessions"), "{err}");
+        // A project name is not a session name, and terminals are not agents.
+        assert!(id("nebula").is_err());
+        assert!(id("shell").is_err());
+        assert!(id("  ").is_err());
+    }
+
+    // `unarchive` resolves over archived rows only, so a live session that
+    // shares the name never makes it ambiguous, and a miss says which pool.
+    #[test]
+    fn unarchive_targets_resolve_among_the_rows_given() {
+        let rows = [
+            ("01A".to_string(), "agent-1".to_string()),
+            ("01B".to_string(), "Fix login".to_string()),
+        ];
+        let archived: Vec<&(String, String)> = rows.iter().collect();
+        let id = |raw: &str| {
+            resolve_by_id_or_name(&archived, raw, "archived session", |r| (&r.0, &r.1))
+                .map(|r| r.0.clone())
+        };
+        assert_eq!(id("login").unwrap(), "01B");
+        assert_eq!(id("01a").unwrap(), "01A");
+        let err = id("review").unwrap_err().to_string();
+        assert_eq!(err, "no archived session matches review");
+    }
+
+    fn archived_agent(id: &str, name: &str, archived: bool) -> Agent {
+        Agent {
+            id: AgentId(id.into()),
+            worktree_id: WorktreeId("w".into()),
+            name: name.into(),
+            status: nebula_core::AgentStatus::Running,
+            archived,
+            archived_at: 0,
+            unseen: false,
+            kind: AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            session_id: None,
+            cloud_session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: !archived,
+            issue_url: None,
+            role: nebula_core::AgentRole::Worker,
+            recent_prompts: Vec::new(),
+        }
+    }
+
+    /// A daemon on the far end of a socket pair for the archive commands:
+    /// it lists `sessions`, snapshots `agents`, acks every archive and
+    /// unarchive except of the ids in `refuse`, and once the client hangs
+    /// up returns what it was asked to archive or unarchive, in order.
+    fn fake_archive_daemon(
+        sessions: Vec<SessionSummary>,
+        agents: Vec<Agent>,
+        refuse: &'static [&'static str],
+    ) -> (Connection, tokio::task::JoinHandle<Vec<String>>) {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let daemon = tokio::spawn(async move {
+            let mut asked = Vec::new();
+            while let Some(req) = read_frame::<ClientRequest, _>(&mut server).await.unwrap() {
+                let (req_id, id) = match req {
+                    ClientRequest::ListSessions { req_id } => {
+                        let sessions = sessions.clone();
+                        let reply = ServerEvent::SessionList { req_id, sessions };
+                        write_frame(&mut server, &reply).await.unwrap();
+                        continue;
+                    }
+                    ClientRequest::Subscribe => {
+                        let reply = ServerEvent::Snapshot {
+                            projects: Vec::new(),
+                            worktrees: Vec::new(),
+                            agents: agents.clone(),
+                            terminals: Vec::new(),
+                            links: Vec::new(),
+                            pr_seen: Vec::new(),
+                            ui_state: None,
+                        };
+                        write_frame(&mut server, &reply).await.unwrap();
+                        continue;
+                    }
+                    ClientRequest::ArchiveAgent { req_id, id } => {
+                        asked.push(format!("archive {}", id.0));
+                        (req_id, id)
+                    }
+                    ClientRequest::UnarchiveAgent { req_id, id } => {
+                        asked.push(format!("unarchive {}", id.0));
+                        (req_id, id)
+                    }
+                    other => panic!("archive commands never send {other:?}"),
+                };
+                let reply = if refuse.contains(&id.0.as_str()) {
+                    ServerEvent::Error {
+                        req_id: Some(req_id),
+                        message: "refused".into(),
+                    }
+                } else {
+                    ServerEvent::Ack {
+                        req_id,
+                        created: None,
+                    }
+                };
+                write_frame(&mut server, &reply).await.unwrap();
+            }
+            asked
+        });
+        let conn = Connection {
+            stream: client,
+            daemon_pid: 1,
+            protocol_version: PROTOCOL_VERSION,
+        };
+        (conn, daemon)
+    }
+
+    fn archive_rows() -> Vec<SessionSummary> {
+        let agent = |id: &str| SessionRef::Agent(AgentId(id.into()));
+        vec![
+            summary(agent("01A"), "01A", "agent-1", "nebula"),
+            summary(agent("01B"), "01B", "agent-12", "nebula"),
+            summary(agent("01C"), "01C", "Fix login", "nebula"),
+        ]
+    }
+
+    /// Run `nebula archive` against [`fake_archive_daemon`]: its result,
+    /// and the requests the daemon saw.
+    async fn archive_against(
+        targets: &[&str],
+        caller: Option<&str>,
+        refuse: &'static [&'static str],
+    ) -> (Result<()>, Vec<String>) {
+        let (mut conn, daemon) = fake_archive_daemon(archive_rows(), Vec::new(), refuse);
+        let targets: Vec<String> = targets.iter().map(|t| t.to_string()).collect();
+        let result = archive_over(&mut conn, &targets, caller).await;
+        drop(conn);
+        (result, daemon.await.unwrap())
+    }
+
+    // Every target resolves before any is archived: a typo, an ambiguous
+    // name or the caller itself anywhere in the list stops every PTY kill.
+    #[tokio::test]
+    async fn archive_sends_nothing_unless_every_target_resolves() {
+        let (result, asked) = archive_against(&["01C", "nope"], None, &[]).await;
+        let err = result.unwrap_err().to_string();
+        assert_eq!(err, "no agent session matches nope");
+        assert!(asked.is_empty(), "{asked:?}");
+
+        let (result, asked) = archive_against(&["01C", "agent"], None, &[]).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("matches 2 sessions"), "{err}");
+        assert!(asked.is_empty(), "{asked:?}");
+
+        let (result, asked) = archive_against(&["01C", "agent-1"], Some("01A"), &[]).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("is the session running this command"), "{err}");
+        assert!(asked.is_empty(), "{asked:?}");
+    }
+
+    #[tokio::test]
+    async fn archive_sends_one_request_per_session_named() {
+        let (result, asked) =
+            archive_against(&["agent-1", "01a", "login", "Fix login"], Some("01B"), &[]).await;
+        result.unwrap();
+        assert_eq!(asked, ["archive 01A", "archive 01C"]);
+    }
+
+    // A refusal is the error, and the sessions after it are left running.
+    #[tokio::test]
+    async fn archive_stops_at_the_first_daemon_error() {
+        let (result, asked) = archive_against(&["01A", "01B", "01C"], None, &["01B"]).await;
+        let err = result.unwrap_err().to_string();
+        assert_eq!(err, "archive agent-12: refused");
+        assert_eq!(asked, ["archive 01A", "archive 01B"]);
+    }
+
+    // `unarchive` resolves among the snapshot's archived agents: a live
+    // session is never restored nor makes a name ambiguous, and the same
+    // all-or-nothing, once-each, stop-on-error rules as `archive` hold.
+    #[tokio::test]
+    async fn unarchive_resolves_among_archived_agents_in_the_snapshot() {
+        let agents = || {
+            vec![
+                archived_agent("01L", "Fix login", false),
+                archived_agent("01X", "Fix login flow", true),
+                archived_agent("01Y", "Review diff", true),
+            ]
+        };
+        let run = |targets: &'static [&'static str], refuse: &'static [&'static str]| {
+            let (mut conn, daemon) = fake_archive_daemon(Vec::new(), agents(), refuse);
+            async move {
+                let targets: Vec<String> = targets.iter().map(|t| t.to_string()).collect();
+                let result = unarchive_over(&mut conn, &targets).await;
+                drop(conn);
+                (result, daemon.await.unwrap())
+            }
+        };
+
+        let (result, asked) = run(&["fix login", "01x", "review"], &[]).await;
+        result.unwrap();
+        assert_eq!(asked, ["unarchive 01X", "unarchive 01Y"]);
+
+        let (result, asked) = run(&["review", "01L"], &[]).await;
+        let err = result.unwrap_err().to_string();
+        assert_eq!(err, "no archived session matches 01L");
+        assert!(asked.is_empty(), "{asked:?}");
+
+        let (result, asked) = run(&["01X", "01Y"], &["01X"]).await;
+        let err = result.unwrap_err().to_string();
+        assert_eq!(err, "unarchive Fix login flow: refused");
+        assert_eq!(asked, ["unarchive 01X"]);
+    }
 
     // Unset and empty are the same miss, and the error has to name the
     // command the model just ran so it knows why it can't work here.
