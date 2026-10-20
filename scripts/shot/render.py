@@ -4,9 +4,13 @@
 Understands the SGR codes nebula emits through crossterm: reset, bold, dim, underline, reverse, 16
 colours, 256-colour and truecolour foreground/background. Everything else is ignored, never fatal.
     python3 render.py capture.ansi out.png [--cols 190] [--rows 50] [--font /System/Library/Fonts/Menlo.ttc] [--size 13]
+Without --font: Menlo on macOS, else the monospace font fontconfig finds with nebula's box-drawing glyphs.
 """
 import argparse
+import os
 import re
+import shutil
+import subprocess
 import sys
 
 try:
@@ -92,6 +96,32 @@ def parse(text, cols, rows):
     return grid
 
 
+MENLO = "/System/Library/Fonts/Menlo.ttc"
+# Rounded corners, a light rule and the ▸ submenu marker: a plain `monospace` match on Linux can be a
+# font without them (Nimbus Mono), which draws every border as tofu.
+NEEDED_GLYPHS = "2500 256d 25b8"
+
+
+def default_font():
+    if os.path.exists(MENLO):
+        return MENLO
+    fc_match = shutil.which("fc-match")
+    if not fc_match:
+        sys.exit("render.py: no Menlo and no fc-match to find a monospace font; pass --font <path>")
+    try:
+        done = subprocess.run([fc_match, "-f", "%{file}", "monospace:charset=" + NEEDED_GLYPHS],
+                              capture_output=True, text=True)
+    except OSError as e:
+        sys.exit("render.py: could not run fc-match (%s); pass --font <path>" % e)
+    if done.returncode != 0:
+        detail = done.stderr.strip() or "exit status %d" % done.returncode
+        sys.exit("render.py: fc-match failed (%s); pass --font <path>" % detail)
+    found = done.stdout.strip()
+    if not found:
+        sys.exit("render.py: fc-match found no monospace font with box-drawing glyphs; pass --font <path>")
+    return found
+
+
 def render(grid, out, font_path, size):
     font = ImageFont.truetype(font_path, size)
     try:
@@ -127,10 +157,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ansi"); ap.add_argument("png")
     ap.add_argument("--cols", type=int, default=190); ap.add_argument("--rows", type=int, default=50)
-    ap.add_argument("--font", default="/System/Library/Fonts/Menlo.ttc"); ap.add_argument("--size", type=int, default=13)
+    ap.add_argument("--font"); ap.add_argument("--size", type=int, default=13)
     a = ap.parse_args()
     text = open(a.ansi, encoding="utf-8", errors="replace").read()
-    size = render(parse(text, a.cols, a.rows), a.png, a.font, a.size)
+    size = render(parse(text, a.cols, a.rows), a.png, a.font or default_font(), a.size)
     print("%s %dx%d" % (a.png, *size))
 
 
