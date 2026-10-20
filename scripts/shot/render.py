@@ -100,6 +100,19 @@ MENLO = "/System/Library/Fonts/Menlo.ttc"
 # Rounded corners, a light rule and the ▸ submenu marker: a plain `monospace` match on Linux can be a
 # font without them (Nimbus Mono), which draws every border as tofu.
 NEEDED_GLYPHS = "2500 256d 25b8"
+# Also drawn, and missing from some fonts that have the above (JetBrains Mono): the ↳ worktree marker,
+# the ⤢ and ⬓ pane buttons and the ✻ agent spinner. Preferred, not required: asking fc-match for a
+# charset no installed font covers makes it rank coverage over spacing and return a proportional font.
+WANTED_GLYPHS = NEEDED_GLYPHS + " 21b3 2922 2b13 273b"
+
+
+def covers(charset, glyphs):
+    """Whether an fc-match %{charset} ("20-7e a0 ...") holds every hex code point in glyphs."""
+    spans = []
+    for r in charset.split():
+        lo, _, hi = r.partition("-")
+        spans.append((int(lo, 16), int(hi or lo, 16)))
+    return all(any(lo <= int(g, 16) <= hi for lo, hi in spans) for g in glyphs.split())
 
 
 def default_font():
@@ -109,17 +122,20 @@ def default_font():
     if not fc_match:
         sys.exit("render.py: no Menlo and no fc-match to find a monospace font; pass --font <path>")
     try:
-        done = subprocess.run([fc_match, "-f", "%{file}", "monospace:charset=" + NEEDED_GLYPHS],
-                              capture_output=True, text=True)
+        done = subprocess.run([fc_match, "-s", "-f", "%{file}\t%{spacing}\t%{charset}\n",
+                               "monospace:charset=" + WANTED_GLYPHS], capture_output=True, text=True)
     except OSError as e:
         sys.exit("render.py: could not run fc-match (%s); pass --font <path>" % e)
     if done.returncode != 0:
         detail = done.stderr.strip() or "exit status %d" % done.returncode
         sys.exit("render.py: fc-match failed (%s); pass --font <path>" % detail)
-    found = done.stdout.strip()
-    if not found:
-        sys.exit("render.py: fc-match found no monospace font with box-drawing glyphs; pass --font <path>")
-    return found
+    fonts = [line.split("\t") for line in done.stdout.splitlines() if line.count("\t") == 2]
+    # fontconfig's ranking, best first; spacing 100 is mono and 90 dual-width (wide icons), both fine.
+    for glyphs, mono_only in ((WANTED_GLYPHS, True), (NEEDED_GLYPHS, True), (NEEDED_GLYPHS, False)):
+        for path, spacing, charset in fonts:
+            if (spacing in ("90", "100") or not mono_only) and covers(charset, glyphs):
+                return path
+    sys.exit("render.py: fc-match found no monospace font with box-drawing glyphs; pass --font <path>")
 
 
 def render(grid, out, font_path, size):
