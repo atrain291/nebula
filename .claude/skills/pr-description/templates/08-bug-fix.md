@@ -22,7 +22,7 @@ Closes #<N>. <One sentence: what was wrong, and what is true now.>
 
 | Before (#<N>) | After |
 |---|---|
-| ![<alt: the bug on screen>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/before.png) | ![<alt: fixed>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/after.png) |
+| ![<alt: the bug on screen>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/before.png) | ![<alt: fixed>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/after.png) |
 
 ## 🔁 State <a id="state"></a>
 
@@ -69,7 +69,7 @@ stateDiagram-v2
 
 ## 🧪 Proof <a id="proof"></a>
 
-- **Regression test.** `<test_name>` in `crates/<crate>/src/<file>.rs` — fails on `origin/main`, passes here.
+- **Regression test.** `<test_name>` in `crates/<crate>/src/<file>.rs` — fails on `fork/main`, passes here.
 - **Gate.** <`make ci` green — N tests; or what did not run and why.>
 
 ## 📝 Notes <a id="notes"></a>

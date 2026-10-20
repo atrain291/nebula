@@ -18,9 +18,9 @@
 
 | Step 1 — <caption> | Step 2 — <caption> |
 |---|---|
-| ![<alt>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/step-1.png) | ![<alt>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/step-2.png) |
+| ![<alt>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/step-1.png) | ![<alt>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/step-2.png) |
 | **Step 3 — <caption>** | **Step 4 — <caption>** |
-| ![<alt>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/step-3.png) | ![<alt>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/step-4.png) |
+| ![<alt>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/step-3.png) | ![<alt>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/step-4.png) |
 
 ## 🧭 Under the hood <a id="under-the-hood"></a>
 

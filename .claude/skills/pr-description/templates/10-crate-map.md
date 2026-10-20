@@ -54,7 +54,7 @@ flowchart LR
 
 | <Caption: what the TUI shows after the change> |
 |---|
-| ![<alt>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/<after>.png) |
+| ![<alt>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/<after>.png) |
 
 <!-- A pure daemon/core change: a fenced block of the terminal output instead, plus one line on why there is no PNG. -->
 
