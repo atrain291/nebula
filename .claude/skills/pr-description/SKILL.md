@@ -61,6 +61,13 @@ Every fact comes from the diff and the commits; do not add a claim
 the code does not make. A gate that did not run is stated as such (PR #22: "`cargo test` could not be
 run in this headless session — please run the test suite before merging"), never implied.
 
+## The fork, never upstream
+
+This checkout works on the fork `atrain291/nebula` (git remote `fork`). The upstream
+`AgentSystemLabs/nebula` (remote `origin`) is never written to: no PR, comment, review, issue or push
+there, and no image hosted there, even when a task names it. Every `gh` call below passes
+`--repo atrain291/nebula`, since `gh` in a fork checkout can default to the parent repository.
+
 ## The house style
 
 PR #16 is the reference shape: an opening paragraph that says what landed and why in two sentences,
@@ -73,10 +80,10 @@ their capitalised names (DAEMON, TUI, HOOK RECEIVER) so the PRs rhyme.
 ### 1. Gather the facts
 
 ```bash
-git fetch origin
-git log --oneline origin/main..HEAD                 # the commits: the story in order
-git diff --stat origin/main...HEAD                  # the files: what the technical overview names
-gh pr view --json number,title,url,body 2>/dev/null # an existing PR to update, or nothing
+git fetch fork
+git log --oneline fork/main..HEAD                   # the commits: the story in order
+git diff --stat fork/main...HEAD                    # the files: what the technical overview names
+gh pr view --repo atrain291/nebula --json number,title,url,body 2>/dev/null # an existing PR to update, or nothing
 ```
 
 Read the commit messages before writing a word: they carry the user's framing of the change, and a
@@ -116,7 +123,7 @@ or a `scripts/shot/scenes/<name>.keys` file for the screen the PR needs), drives
 and writes `design-screenshots/<name>.{txt,ansi,png}`. Its traps are encoded in the script (short
 `NEBULA_RUNTIME_DIR`, `NEBULA_AGENT_CMD=/bin/cat`, one Bash call per drive, `capture-pane -epN`).
 
-Take the "before" shot from an `origin/main` build only when the template asks for a pair. Crop
+Take the "before" shot from a `fork/main` build only when the template asks for a pair. Crop
 nothing; the whole screen at `190x50` is the house frame, and `design-screenshots/` shows the look.
 
 ### 4. Host them on the `pr-assets` branch
@@ -127,16 +134,16 @@ raw URL. Do it in a private worktree in the scratchpad — never in the SHARED C
 
 ```bash
 R=<repo>; W=<scratchpad>/pr-assets; SLUG=<branch-name>
-git -C "$R" fetch origin pr-assets 2>/dev/null \
-  && git -C "$R" worktree add "$W" -B pr-assets origin/pr-assets \
+git -C "$R" fetch fork pr-assets 2>/dev/null \
+  && git -C "$R" worktree add --detach "$W" fork/pr-assets \
   || { git -C "$R" worktree add --detach "$W" && git -C "$W" checkout --orphan pr-assets && git -C "$W" rm -rfq .; }
 mkdir -p "$W/$SLUG" && cp <scratchpad>/shots/*.png "$W/$SLUG/"
-git -C "$W" add "$SLUG" && git -C "$W" commit -q -m "PR assets: $SLUG" && git -C "$W" push -q origin pr-assets
+git -C "$W" add "$SLUG" && git -C "$W" commit -q -m "PR assets: $SLUG" && git -C "$W" push -q fork HEAD:pr-assets
 git -C "$R" worktree remove "$W"
 ```
 
 Then reference each image as
-`https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch-name>/<name>.png`.
+`https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch-name>/<name>.png`.
 Two images side by side is a two-column table with one `![…](url)` per cell — GitHub scales them to
 the cell. Give every image alt text that says what it shows; a text search of the PR keeps the alt
 text, not the pixels.
@@ -171,13 +178,12 @@ Always `--body-file`, never `--body "$(cat …)"`: backticks in the body would b
 by zsh.
 
 ```bash
-gh pr create --title "<title>" --body-file <scratchpad>/pr-body.md          # new
-gh pr edit <number> --body-file <scratchpad>/pr-body.md                     # update
+gh pr create --repo atrain291/nebula --base main --title "<title>" --body-file <scratchpad>/pr-body.md   # new
+gh pr edit <number> --repo atrain291/nebula --body-file <scratchpad>/pr-body.md                          # update
 ```
 
-`gh pr create` needs the branch pushed and an account with write access — `gh auth status`; the
-admin account is `webdevcody`, and `gh auth switch --hostname github.com --user webdevcody` if it
-drifted. Add `--draft` when the gate has not run. Put `Closes #N` in the body, not the title, so
+`gh pr create` needs the branch pushed to `fork` and the fork's owner signed in — `gh auth status`
+should show `atrain291`; `gh auth switch --hostname github.com --user atrain291` if it drifted. Add `--draft` when the gate has not run. Put `Closes #N` in the body, not the title, so
 GitHub links the issue. After it lands, print the PR URL.
 
 ## GitHub anchors

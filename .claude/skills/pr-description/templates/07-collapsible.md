@@ -40,7 +40,7 @@
 
 | <Change one> | <Change two> |
 |---|---|
-| ![<alt>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/<one>.png) | ![<alt>](https://raw.githubusercontent.com/AgentSystemLabs/nebula/pr-assets/<branch>/<two>.png) |
+| ![<alt>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/<one>.png) | ![<alt>](https://raw.githubusercontent.com/atrain291/nebula/pr-assets/<branch>/<two>.png) |
 
 ## 🧩 Architecture <a id="architecture"></a>
 
