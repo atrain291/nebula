@@ -17,6 +17,14 @@ except ImportError:  # render.py exits without Pillow; font discovery doesn't ne
 import render
 
 FONT = "/usr/share/fonts/TTF/DejaVuSansMono.ttf"
+ASCII = "20-7e a0-17f"
+NEEDED = ASCII + " 2500 256d 25b8"  # the box-drawing glyphs, none of the extras
+WANTED = NEEDED + " 21b3 2922 2b13 273b"
+
+
+def fonts(*rows):
+    """fc-match -s output: one (path, spacing, charset) row per font, best ranked first."""
+    return "".join("%s\t%s\t%s\n" % row for row in rows)
 
 
 def ran(returncode=0, stdout="", stderr=""):
@@ -37,17 +45,44 @@ class DefaultFont(unittest.TestCase):
         return str(e.exception.code)
 
     def test_menlo_wins_when_present(self):
-        found, which, run = self.discover(menlo=True, run=ran(stdout=FONT))
+        found, which, run = self.discover(menlo=True, run=ran(stdout=fonts((FONT, "100", WANTED))))
         self.assertEqual(found, render.MENLO)
         which.assert_not_called()
         run.assert_not_called()
 
     def test_fontconfig_result_used_on_linux(self):
-        found, _, run = self.discover(run=ran(stdout=FONT + "\n"))
+        found, _, run = self.discover(run=ran(stdout=fonts((FONT, "100", WANTED))))
         self.assertEqual(found, FONT)
         args = run.call_args[0][0]
         self.assertEqual(args[0], "/usr/bin/fc-match")
-        self.assertIn("monospace:charset=" + render.NEEDED_GLYPHS, args)
+        self.assertIn("-s", args)
+        self.assertIn("monospace:charset=" + render.WANTED_GLYPHS, args)
+
+    def test_prefers_a_font_with_every_glyph(self):
+        found, _, _ = self.discover(run=ran(stdout=fonts(
+            ("/f/JetBrainsMono.ttf", "100", NEEDED), ("/f/AdwaitaMono.ttf", "100", WANTED))))
+        self.assertEqual(found, "/f/AdwaitaMono.ttf")
+
+    def test_falls_back_to_the_box_drawing_glyphs(self):
+        # What fontconfig really ranked on a machine without Adwaita Mono: a proportional math font
+        # first, because no font has every glyph and charset coverage outranked spacing.
+        found, _, _ = self.discover(run=ran(stdout=fonts(
+            ("/f/NotoSansMath.ttf", "", ASCII + " 2922"), ("/f/JetBrainsMono.ttf", "100", NEEDED))))
+        self.assertEqual(found, "/f/JetBrainsMono.ttf")
+
+    def test_dual_width_counts_as_monospace(self):
+        found, _, _ = self.discover(run=ran(stdout=fonts(
+            ("/f/Proportional.ttf", "", WANTED), ("/f/NerdFont.ttf", "90", WANTED))))
+        self.assertEqual(found, "/f/NerdFont.ttf")
+
+    def test_unflagged_spacing_is_the_last_resort(self):
+        found, _, _ = self.discover(run=ran(stdout=fonts(
+            ("/f/Plain.ttf", "100", ASCII), ("/f/NotoSansMono.ttf", "", NEEDED))))
+        self.assertEqual(found, "/f/NotoSansMono.ttf")
+
+    def test_no_font_has_the_box_drawing_glyphs(self):
+        msg = self.exits(run=ran(stdout=fonts(("/f/NimbusMono.otf", "100", ASCII))))
+        self.assertIn("found no monospace font", msg)
 
     def test_fc_match_missing(self):
         self.assertIn("no fc-match", self.exits(which=None))
