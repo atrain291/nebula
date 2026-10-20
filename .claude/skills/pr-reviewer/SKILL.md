@@ -25,17 +25,25 @@ GitHub builds or tests a PR at all (`claude-code-review.yml` is the only PR work
 runs on tags), which is itself a fact the review states. What reading cannot settle goes into the
 review as *unsettled*, named precisely enough that a human can run it. It is never quietly run.
 
+## The fork, never upstream
+
+This checkout works on the fork `atrain291/nebula` (git remote `fork`). The upstream
+`AgentSystemLabs/nebula` (remote `origin`) is never written to: the review is posted only on a fork PR,
+and every `gh` call passes `--repo atrain291/nebula`, since `gh` in a fork checkout can default to the
+parent repository. A PR the user names on upstream may be read, but the finished review stays in the
+scratchpad and is shown to the user; it is posted there only if the user says so for that PR.
+
 ## Read, never run
 
 Allowed — every one of these is a read: it touches no working tree and executes nothing from the PR.
 
 ```bash
-gh pr view <n> --json …                          # metadata, description, files, checks, reviews
-gh pr diff <n>                                   # the unified diff
-gh pr checks <n>                                 # CI state as GitHub reports it (exit 8 = pending)
-gh api repos/<owner>/<repo>/pulls/<n>/comments   # inline review comments — not a --json field
-git fetch origin && git fetch origin pull/<n>/head   # refresh origin/<base>; the PR head lands in FETCH_HEAD, no ref, no checkout
-git merge-base origin/<base> <headRefOid>        # the commit the PR branched from — origin/<base> has moved on since, and is not the base
+gh pr view <n> --repo atrain291/nebula --json …   # metadata, description, files, checks, reviews
+gh pr diff <n> --repo atrain291/nebula            # the unified diff
+gh pr checks <n> --repo atrain291/nebula          # CI state as GitHub reports it (exit 8 = pending)
+gh api repos/atrain291/nebula/pulls/<n>/comments  # inline review comments — not a --json field
+git fetch fork && git fetch fork pull/<n>/head   # refresh fork/<base>; the PR head lands in FETCH_HEAD, no ref, no checkout
+git merge-base fork/<base> <headRefOid>          # the commit the PR branched from — fork/<base> has moved on since, and is not the base
 git show <headRefOid>:<path>                     # the PR's whole file (the SHA is stable; FETCH_HEAD is not, other sessions fetch too)
 git show <mergeBase>:<path>                      # the same file as the PR saw it — what `gh pr diff` is relative to
 git log · git grep · grep · cat · sed -n · wc · diff   # over files, never through them
@@ -61,18 +69,18 @@ The `--comment` review is the only write the skill performs, and it is the last 
 
 ### 1. Resolve the PR and fetch what GitHub knows
 
-The PR is the number, URL or branch the user gave; otherwise the current branch's PR (`gh pr view`
-with no argument); otherwise the PR this SESSION was opened on (a PR SESSION carries its URL in the
-system prompt). No PR → ask for the number; never pick one from `gh pr list`.
+The PR is the number, URL or branch the user gave; otherwise the current branch's PR
+(`gh pr view --repo atrain291/nebula` with no number); otherwise the PR this SESSION was opened on
+(a PR SESSION carries its URL in the system prompt). No PR → ask for the number; never pick one from `gh pr list`.
 
 ```bash
-N=<number>; R=AgentSystemLabs/nebula; S=<scratchpad>
+N=<number>; R=atrain291/nebula; S=<scratchpad>
 gh pr view $N --repo $R --json number,title,url,body,author,baseRefName,headRefName,headRefOid,isDraft,isCrossRepository,mergeable,additions,deletions,changedFiles,files,commits,reviews,comments,statusCheckRollup > $S/pr.json
 gh pr diff $N --repo $R > $S/pr.diff
 gh pr checks $N --repo $R > $S/pr.checks 2>&1 || true      # exit 8 = pending; the output is still the answer
 gh api repos/$R/pulls/$N/comments --paginate --jq '.[] | "\(.path):\(.line // .original_line) \(.user.login): \(.body)"' > $S/pr.inline
-git fetch -q origin && git fetch -q origin pull/$N/head
-git merge-base origin/<baseRefName> <headRefOid> > $S/pr.base   # both from pr.json; the commit pr.diff is relative to
+git fetch -q fork && git fetch -q fork pull/$N/head
+git merge-base fork/<baseRefName> <headRefOid> > $S/pr.base   # both from pr.json; the commit pr.diff is relative to
 ```
 
 Read `pr.json` first. `isCrossRepository` — a fork raises the bar on everything under `.github/`,
@@ -81,7 +89,7 @@ opening the diff. `additions` / `deletions` / `changedFiles` — the only counts
 `statusCheckRollup` and `pr.checks` — on this repo that is `claude-review` alone; say so. `reviews`,
 `comments` and `pr.inline` — what the automated Claude Code Review workflow and any human already
 said; reference it, do not repeat it. `pr.base` — the merge base, the only "before" this review reads:
-`origin/<base>` is whatever `main` is now, and on a day with several merges a file there already
+`fork/<base>` is whatever `main` is now, and on a day with several merges a file there already
 carries other PRs' changes, so comparing against it pins their hunks on this PR or hides a regression.
 Then read the description against the diff: a body that claims a focus-tint fix while the diff touches
 INSTALL.SH is the review's first finding.
@@ -89,7 +97,7 @@ INSTALL.SH is the review's first finding.
 ### 2. Read what the repo already knows about this area
 
 ```bash
-git log --oneline -15 origin/<baseRefName> -- <each touched path>                  # the last changes to the same files, and the PRs that made them
+git log --oneline -15 fork/<baseRefName> -- <each touched path>                  # the last changes to the same files, and the PRs that made them
 gh pr list --repo $R --state merged --search '<touched file basename>' --limit 5     # earlier PRs on the same area, and what their reviews pushed back on
 ```
 
@@ -105,7 +113,7 @@ Read `pr.diff` hunk by hunk in risk order: `.github/`, INSTALL.SH, `Cargo.toml` 
 `tunnel.rs`, `upgrade.rs`, `browser.rs`, `paths.rs`, `lifecycle.rs`; then the TUI; then docs.
 A hunk is not a unit of meaning: for every function the diff touches, `git show
 <headRefOid>:<path>` the whole function and `git show $(cat $S/pr.base):<path>` its previous shape —
-the merge base, never `origin/<base>` — and `git grep` the callers of anything whose signature or
+the merge base, never `fork/<base>` — and `git grep` the callers of anything whose signature or
 contract moved.
 
 ### 4. Security and production-merge risk — first and heaviest
@@ -227,7 +235,7 @@ bullets; under ~70 lines unless the Blockers need more. Speak to the author, not
 ### 8. Post it — the one write
 
 ```bash
-gh auth status                                                      # the account that signs it
+gh auth status                                                      # should be atrain291, the fork's owner
 gh pr review $N --repo $R --comment --body-file <scratchpad>/pr-review.md
 ```
 
