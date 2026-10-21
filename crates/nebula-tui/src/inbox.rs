@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-pub(crate) const FOOTER: &str = "^A: capture  Enter: review  ^O: session  ^D: archive/restore  ^H: archived  ^R: refresh  Esc: clear/close";
+pub(crate) const FOOTER: &str = "^A: capture  Enter: review  ^O: session  ^D: archive/restore  ^L: archived  ^R: refresh  Esc: clear/close";
 
 #[derive(Debug, Default)]
 pub struct InboxState {
@@ -40,6 +40,8 @@ pub struct InboxView {
     pub editor: Rect,
     pub buttons: Vec<(Rect, Action)>,
     pub capture: Option<(InboxId, TextInput)>,
+    /// Freeze submitted source until its capture RPC confirms or fails.
+    pub capture_saving: Option<u64>,
     pub archived: bool,
     pub scroll: u16,
 }
@@ -53,6 +55,7 @@ impl InboxView {
             editor: Rect::default(),
             buttons: vec![],
             capture: None,
+            capture_saving: None,
             archived: false,
             scroll: 0,
         }
@@ -110,6 +113,7 @@ pub(crate) fn land(app: &mut App, items: Vec<InboxItem>) {
             .is_some_and(|(id, _)| app.inbox.items.iter().any(|i| &i.id == id))
         {
             view.capture = None;
+            view.capture_saving = None;
         }
         view.rebuild(&app.inbox.items);
     }
@@ -132,14 +136,37 @@ fn send_capture(
     original: String,
     source_url: Option<String>,
     out: &mut Vec<ClientRequest>,
-) {
-    crate::event_loop::send(app, out, |req_id| ClientRequest::CaptureInbox {
+) -> u64 {
+    let req_id = app.alloc_req_id(PendingIntent::None);
+    out.push(ClientRequest::CaptureInbox {
         req_id,
         id,
         original,
         source_url,
     });
     refresh(app, out);
+    req_id
+}
+
+pub(crate) fn capture_succeeded(app: &mut App, req_id: u64) {
+    if let Some(Overlay::Inbox(view)) = &mut app.modals.overlay {
+        if view.capture_saving == Some(req_id) {
+            // Ack proves the submitted source is durable. A subsequent
+            // list failure must not leave the editor frozen indefinitely.
+            view.capture = None;
+            view.capture_saving = None;
+            app.chrome.dirty = true;
+        }
+    }
+}
+
+pub(crate) fn capture_failed(app: &mut App, req_id: u64) {
+    if let Some(Overlay::Inbox(view)) = &mut app.modals.overlay {
+        if view.capture_saving == Some(req_id) {
+            view.capture_saving = None;
+            app.chrome.dirty = true;
+        }
+    }
 }
 
 pub(crate) fn act(app: &mut App, action: Action, out: &mut Vec<ClientRequest>) {
@@ -147,12 +174,24 @@ pub(crate) fn act(app: &mut App, action: Action, out: &mut Vec<ClientRequest>) {
         return;
     };
     match action {
-        Action::Capture => view.capture = Some((InboxId::generate(), TextInput::multiline())),
-        Action::CancelCapture => view.capture = None,
+        Action::Capture => {
+            view.capture = Some((InboxId::generate(), TextInput::multiline()));
+            view.capture_saving = None;
+        }
+        Action::CancelCapture => {
+            view.capture = None;
+            view.capture_saving = None;
+        }
         Action::SaveCapture => {
+            if view.capture_saving.is_some() {
+                return;
+            }
             if let Some((id, input)) = &view.capture {
                 let (id, text) = (id.clone(), input.as_str().to_string());
-                send_capture(app, id, text, None, out);
+                let req_id = send_capture(app, id, text, None, out);
+                if let Some(Overlay::Inbox(view)) = &mut app.modals.overlay {
+                    view.capture_saving = Some(req_id);
+                }
             }
         }
         Action::Archived => {
@@ -224,6 +263,11 @@ fn review(app: &mut App) {
         ),
         None => QuickLaunch::from_config(QuickTarget::Worktree(target), &cfg),
     };
+    // Saved None means no CLI flag, not "resolve against today's settings".
+    if let Some(draft) = &item.draft {
+        launch.model = draft.model.clone();
+        launch.effort = draft.effort.clone();
+    }
     launch.inbox = Some(item.id);
     launch.under = ModalUnder::of(app.modals.overlay.as_ref());
     let text = item
@@ -280,9 +324,28 @@ pub(crate) fn save_review(app: &mut App, out: &mut Vec<ClientRequest>) -> bool {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    // Legacy terminals may send 0x08 for Backspace; crossterm reports
+    // that byte as Ctrl+H. Keep deletion distinct from the ^L list toggle.
+    let key = if matches!(key.code, KeyCode::Char('h' | 'H'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: key.modifiers.difference(KeyModifiers::CONTROL),
+            ..key
+        }
+    } else {
+        key
+    };
     let Some(Overlay::Inbox(view)) = &mut app.modals.overlay else {
         return;
     };
+    if view.capture_saving.is_some() {
+        if key.code == KeyCode::Esc {
+            act(app, Action::CancelCapture, out);
+        }
+        return;
+    }
     if let Some((_, input)) = &mut view.capture {
         let action = match key.code {
             KeyCode::Esc => Some(Action::CancelCapture),
@@ -300,7 +363,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         let action = match key.code {
             KeyCode::Char('a') if ctrl => Some(Action::Capture),
             KeyCode::Char('d') if ctrl => Some(Action::Archive),
-            KeyCode::Char('h') if ctrl => Some(Action::Archived),
+            KeyCode::Char('l') if ctrl => Some(Action::Archived),
             KeyCode::Char('r') if ctrl => Some(Action::Refresh),
             KeyCode::Char('o') if ctrl => Some(Action::Session),
             KeyCode::Enter => Some(Action::Review),
@@ -335,6 +398,9 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(Overlay::Inbox(view)) = &mut app.modals.overlay else {
         return false;
     };
+    if view.capture_saving.is_some() {
+        return true;
+    }
     if let Some((_, input)) = &mut view.capture {
         input.insert_str(text);
     } else {
@@ -359,6 +425,17 @@ pub(crate) fn handle_mouse(
     let Some(Overlay::Inbox(view)) = &mut app.modals.overlay else {
         return;
     };
+    if view.capture_saving.is_some() {
+        let cancel = mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && view
+                .buttons
+                .iter()
+                .any(|(r, action)| *action == Action::CancelCapture && r.contains(pos));
+        if cancel {
+            act(app, Action::CancelCapture, out);
+        }
+        return;
+    }
     let mut action = None;
     let mut row = None;
     match mouse.kind {
@@ -436,7 +513,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, mut view: InboxView, dimmed: bo
             (" Review Enter ", Action::Review),
             (" Session ^O ", Action::Session),
             (" Archive/restore ^D ", Action::Archive),
-            (" Archived ^H ", Action::Archived),
+            (" Archived ^L ", Action::Archived),
             (" Refresh ^R ", Action::Refresh),
         ]
     };
@@ -457,7 +534,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, mut view: InboxView, dimmed: bo
     }
     if let Some((_, input)) = &mut view.capture {
         f.render_widget(
-            Paragraph::new("Enter saves only · ⇧Enter/^J newline · Esc cancels"),
+            Paragraph::new(if view.capture_saving.is_some() {
+                "Saving capture… · Esc closes"
+            } else {
+                "Enter saves only · ⇧Enter/^J newline · Esc cancels"
+            }),
             parts[1],
         );
         view.editor = parts[2];

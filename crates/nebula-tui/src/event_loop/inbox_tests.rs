@@ -360,3 +360,154 @@ fn inbox_imports_issue_source_without_launching_and_skip_task_presets_still_requ
         });
     });
 }
+
+#[test]
+fn inbox_review_capture_does_not_accept_edits_while_save_is_pending() {
+    with_default_config(|| {
+        let mut app = fixture();
+        key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        inbox::paste(&mut app, "Captured A");
+        let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(out
+            .iter()
+            .any(|r| matches!(r, ClientRequest::CaptureInbox { .. })));
+        key(&mut app, KeyCode::Char('B'), KeyModifiers::NONE);
+        inbox::paste(&mut app, "paste");
+        let Some(Overlay::Inbox(view)) = &app.modals.overlay else {
+            panic!();
+        };
+        assert_eq!(
+            view.capture.as_ref().unwrap().1.as_str(),
+            "Captured A",
+            "in-flight capture edits would be discarded when its reply closes the editor"
+        );
+        assert!(
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE).is_empty(),
+            "repeated save must wait for the original result"
+        );
+
+        let req_id = out
+            .iter()
+            .find_map(|r| match r {
+                ClientRequest::CaptureInbox { req_id, .. } => Some(*req_id),
+                _ => None,
+            })
+            .unwrap();
+        handle_server_event(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(req_id),
+                message: "capture failed".into(),
+            },
+            &mut vec![],
+        );
+        key(&mut app, KeyCode::Char('B'), KeyModifiers::NONE);
+        let retry = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let (req_id, id, original) = retry
+            .iter()
+            .find_map(|r| match r {
+                ClientRequest::CaptureInbox {
+                    req_id,
+                    id,
+                    original,
+                    ..
+                } => Some((*req_id, id.clone(), original.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            original, "Captured AB",
+            "failed capture must unlock the original text for editing and retry"
+        );
+        handle_server_event(
+            &mut app,
+            ServerEvent::Ack {
+                req_id,
+                created: None,
+            },
+            &mut vec![],
+        );
+        let Some(Overlay::Inbox(view)) = &app.modals.overlay else {
+            panic!();
+        };
+        assert!(view.capture.is_none(), "capture Ack confirms durability and closes the frozen editor independently of list refresh");
+        assert_eq!(view.capture_saving, None);
+        let list_req = retry
+            .iter()
+            .find_map(|r| match r {
+                ClientRequest::ListInbox { req_id } => Some(*req_id),
+                _ => None,
+            })
+            .unwrap();
+        handle_server_event(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(list_req),
+                message: "list refresh failed".into(),
+            },
+            &mut vec![],
+        );
+        key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        inbox::paste(&mut app, "Next capture");
+        let mut stored = app.inbox.items[0].clone();
+        stored.id = id;
+        stored.original = original;
+        inbox::land(&mut app, vec![stored]);
+        let Some(Overlay::Inbox(view)) = &app.modals.overlay else {
+            panic!();
+        };
+        assert_eq!(
+            view.capture.as_ref().unwrap().1.as_str(),
+            "Next capture",
+            "a failed or late list refresh must not freeze or close the next capture"
+        );
+        assert_eq!(view.capture_saving, None);
+    });
+}
+
+#[test]
+fn inbox_review_restores_explicit_cli_defaults_after_settings_change() {
+    super::tests::with_config_json(r#"{"claude_model":"sonnet","claude_effort":"max"}"#, || {
+        let mut app = fixture();
+        app.inbox.items[0].draft = Some(nebula_core::InboxDraft {
+            instructions: "Saved review".into(),
+            worktree: app.tree.worktrees[0].id.clone(),
+            kind: AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+        });
+        inbox::open(&mut app, &mut vec![]);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let Some(Overlay::Prompt(p)) = &app.modals.overlay else {
+            panic!();
+        };
+        let PromptKind::QuickPrompt(launch) = &p.kind else {
+            panic!();
+        };
+        assert_eq!(
+            launch.model, None,
+            "saved no-model-flag choice must survive new settings defaults"
+        );
+        assert_eq!(launch.effort, None);
+    });
+}
+
+#[test]
+fn inbox_review_legacy_backspace_edits_filter_and_control_l_switches_archived() {
+    with_default_config(|| {
+        let mut app = fixture();
+        key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        key(&mut app, KeyCode::Char('h'), KeyModifiers::CONTROL);
+        let Some(Overlay::Inbox(view)) = &app.modals.overlay else {
+            panic!();
+        };
+        assert!(!view.archived);
+        assert_eq!(view.list.query.as_str(), "");
+        key(&mut app, KeyCode::Char('l'), KeyModifiers::CONTROL);
+        let Some(Overlay::Inbox(view)) = &app.modals.overlay else {
+            panic!();
+        };
+        assert!(view.archived);
+    });
+}
