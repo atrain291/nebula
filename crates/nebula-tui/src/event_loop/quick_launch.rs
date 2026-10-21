@@ -254,6 +254,7 @@ pub(super) fn draft(
     );
     AgentLaunchDraft {
         inbox: launch.inbox.clone(),
+        inbox_review_revision: launch.inbox_review_revision,
         custom: launch.custom.clone(),
         // A CLAUDE CLOUD box sends the text as the cloud task instead —
         // `claude --cloud <task>` — and no STARTING PROMPT beside it, which

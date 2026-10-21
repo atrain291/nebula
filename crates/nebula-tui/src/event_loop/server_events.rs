@@ -265,7 +265,7 @@ fn handle_ack_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientReque
     let _ = &mut *out;
     match event {
         ServerEvent::Ack { req_id, created } => {
-            crate::inbox::capture_succeeded(app, req_id);
+            crate::inbox::capture_succeeded(app, req_id, out);
             // False for a create the user has navigated away from since
             // firing it (`App::left_behind`): the rows still become the
             // real ones, and nothing below moves a cursor, the pane or

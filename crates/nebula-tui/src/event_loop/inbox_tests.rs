@@ -19,6 +19,10 @@ fn fixture() -> App {
             session: None,
             created_at: 1,
             updated_at: 1,
+            review: Default::default(),
+            review_revision: 0,
+            review_history: vec![],
+            launch: None,
         }],
     );
     inbox::open(&mut app, &mut vec![]);
@@ -191,6 +195,8 @@ fn inbox_archive_mouse_and_keyboard_use_the_same_action_and_filter_escape_is_sta
 fn inbox_picker_round_trips_keep_identity_and_never_create_a_worktree() {
     with_default_config(|| {
         let mut app = fixture();
+        app.inbox.items[0].review_revision = 7;
+        inbox::open(&mut app, &mut vec![]);
         key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         let id = app.inbox.items[0].id.clone();
         let mut other = app.tree.worktrees[0].clone();
@@ -222,6 +228,7 @@ fn inbox_picker_round_trips_keep_identity_and_never_create_a_worktree() {
             panic!();
         };
         assert_eq!(launch.inbox.as_ref(), Some(&id));
+        assert_eq!(launch.inbox_review_revision, 7);
         assert_no_launch(&key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL));
         assert_no_launch(&key(&mut app, KeyCode::Enter, KeyModifiers::NONE));
         let Some(Overlay::Prompt(p)) = &app.modals.overlay else {
@@ -231,6 +238,7 @@ fn inbox_picker_round_trips_keep_identity_and_never_create_a_worktree() {
             panic!();
         };
         assert_eq!(launch.inbox.as_ref(), Some(&id));
+        assert_eq!(launch.inbox_review_revision, 7);
     });
 }
 
@@ -341,6 +349,8 @@ fn inbox_imports_issue_source_without_launching_and_skip_task_presets_still_requ
             }])
             .unwrap();
             let mut app = fixture();
+            app.inbox.items[0].review_revision = 7;
+            inbox::open(&mut app, &mut vec![]);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             let Some(Overlay::Prompt(p)) = &mut app.modals.overlay else {
                 panic!();
@@ -356,6 +366,7 @@ fn inbox_imports_issue_source_without_launching_and_skip_task_presets_still_requ
             };
             assert_eq!(launch.inbox.as_ref(), Some(&app.inbox.items[0].id));
             assert!(launch.preset.is_some());
+            assert_eq!(launch.inbox_review_revision, 7);
             assert_no_launch(&key(&mut app, KeyCode::Esc, KeyModifiers::NONE));
         });
     });
@@ -470,6 +481,7 @@ fn inbox_review_restores_explicit_cli_defaults_after_settings_change() {
     super::tests::with_config_json(r#"{"claude_model":"sonnet","claude_effort":"max"}"#, || {
         let mut app = fixture();
         app.inbox.items[0].draft = Some(nebula_core::InboxDraft {
+            review_revision: 0,
             instructions: "Saved review".into(),
             worktree: app.tree.worktrees[0].id.clone(),
             kind: AgentKind::Claude,
@@ -509,5 +521,239 @@ fn inbox_review_legacy_backspace_edits_filter_and_control_l_switches_archived() 
             panic!();
         };
         assert!(view.archived);
+    });
+}
+
+#[test]
+fn inbox_outcome_details_keyboard_mouse_save_and_cancel_parity() {
+    with_default_config(|| {
+        let mut keys = fixture();
+        let mut mouse = fixture();
+        assert_no_launch(&key(&mut keys, KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_no_launch(&click_action(&mut mouse, Action::Details));
+        for app in [&mut keys, &mut mouse] {
+            inbox::paste(app, "Approved criteria");
+            key(app, KeyCode::Tab, KeyModifiers::NONE);
+            inbox::paste(app, "Approved constraints");
+            key(app, KeyCode::Tab, KeyModifiers::NONE);
+            inbox::paste(app, "cargo test: descriptive plan");
+            key(app, KeyCode::Tab, KeyModifiers::NONE);
+            inbox::paste(app, "Manual review result");
+        }
+        key(&mut keys, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        click_action(
+            &mut mouse,
+            Action::Outcome(nebula_core::InboxOutcome::Accepted),
+        );
+        let key_save = key(&mut keys, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let mouse_save = click_action(&mut mouse, Action::SaveDetails);
+        for out in [&key_save, &mouse_save] {
+            assert_no_launch(out);
+        }
+        let extract = |out: &[ClientRequest]| {
+            out.iter()
+                .find_map(|r| match r {
+                    ClientRequest::SaveInboxReview {
+                        review,
+                        expected_revision,
+                        ..
+                    } => Some((review.clone(), *expected_revision)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(extract(&key_save), extract(&mouse_save));
+        let (review, revision) = extract(&key_save);
+        assert_eq!(revision, 0);
+        assert_eq!(review.outcome, nebula_core::InboxOutcome::Accepted);
+        assert_eq!(review.done_when, "Approved criteria");
+        assert_eq!(review.constraints, "Approved constraints");
+        assert_eq!(review.verification_plan, "cargo test: descriptive plan");
+        assert_eq!(review.note, "Manual review result");
+        // Cancellation has no launch effect, including a submitted save.
+        assert_no_launch(&key(&mut keys, KeyCode::Esc, KeyModifiers::NONE));
+        assert_no_launch(&click_action(&mut mouse, Action::CancelDetails));
+        for app in [&keys, &mouse] {
+            let Some(Overlay::Inbox(view)) = &app.modals.overlay else {
+                panic!();
+            };
+            assert!(view.details.is_none());
+            assert_eq!(
+                app.inbox.items[0].original,
+                "Original title\n\nOriginal body"
+            );
+        }
+    });
+}
+
+#[test]
+fn inbox_outcome_failed_save_preserves_edits_and_duplicate_retry_identity() {
+    with_default_config(|| {
+        let mut app = fixture();
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        inbox::paste(&mut app, "Reviewed criteria");
+        let save = key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let extract = |out: &[ClientRequest]| {
+            out.iter()
+                .find_map(|r| match r {
+                    ClientRequest::SaveInboxReview {
+                        req_id,
+                        event_id,
+                        review,
+                        ..
+                    } => Some((*req_id, event_id.clone(), review.clone())),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (req, event, review) = extract(&save);
+        assert!(key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).is_empty());
+        inbox::paste(&mut app, "discarded while pending");
+        handle_server_event(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(req),
+                message: "save failed".into(),
+            },
+            &mut vec![],
+        );
+        let retry = key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let (retry_req, retry_event, retry_review) = extract(&retry);
+        assert_eq!(event, retry_event);
+        assert_eq!(review, retry_review);
+        handle_server_event(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(retry_req),
+                message: "save failed".into(),
+            },
+            &mut vec![],
+        );
+        inbox::paste(&mut app, " edited");
+        let edited = key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let (edited_req, edited_event, edited_review) = extract(&edited);
+        assert_ne!(event, edited_event);
+        assert_eq!(edited_review.done_when, "Reviewed criteria edited");
+        let mut out = vec![];
+        handle_server_event(
+            &mut app,
+            ServerEvent::Ack {
+                req_id: edited_req,
+                created: None,
+            },
+            &mut out,
+        );
+        assert!(out
+            .iter()
+            .any(|r| matches!(r, ClientRequest::ListInbox { .. })));
+        assert_no_launch(&out);
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        inbox::paste(&mut app, "Next unsaved edit");
+        handle_server_event(
+            &mut app,
+            ServerEvent::Ack {
+                req_id: edited_req,
+                created: None,
+            },
+            &mut vec![],
+        );
+        let Some(Overlay::Inbox(view)) = &app.modals.overlay else {
+            panic!();
+        };
+        assert_eq!(
+            view.details.as_ref().unwrap().inputs[0].as_str(),
+            "Next unsaved edit"
+        );
+    });
+}
+
+#[test]
+fn inbox_outcome_launch_uses_review_revision_and_session_status_never_accepts() {
+    with_default_config(|| {
+        let mut app = fixture();
+        app.inbox.items[0].review_revision = 7;
+        app.inbox.items[0].review.done_when = "User criteria".into();
+        inbox::open(&mut app, &mut vec![]);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let Some(Overlay::Prompt(prompt)) = &app.modals.overlay else {
+            panic!();
+        };
+        let PromptKind::QuickPrompt(launch) = &prompt.kind else {
+            panic!();
+        };
+        assert_eq!(launch.inbox_review_revision, 7);
+        // A later list update cannot substitute unseen criteria at submission.
+        app.inbox.items[0].review_revision = 8;
+        let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(out.iter().any(
+            |r| matches!(r, ClientRequest::LaunchInbox { draft, .. } if draft.review_revision == 7)
+        ));
+        assert_eq!(
+            app.inbox.items[0].review.outcome,
+            nebula_core::InboxOutcome::NeedsReview
+        );
+    });
+}
+
+#[test]
+fn inbox_outcome_save_ack_refreshes_after_cancel_without_closing_a_new_editor() {
+    with_default_config(|| {
+        let mut app = fixture();
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        inbox::paste(&mut app, "Submitted criteria");
+        let save = key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let req_id = save
+            .iter()
+            .find_map(|r| match r {
+                ClientRequest::SaveInboxReview { req_id, .. } => Some(*req_id),
+                _ => None,
+            })
+            .unwrap();
+        key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        inbox::paste(&mut app, "New unsaved criteria");
+        let mut out = vec![];
+        handle_server_event(
+            &mut app,
+            ServerEvent::Ack {
+                req_id,
+                created: None,
+            },
+            &mut out,
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|r| matches!(r, ClientRequest::ListInbox { .. }))
+                .count(),
+            1
+        );
+        assert_no_launch(&out);
+        assert!(app.inbox.review_saves.is_empty());
+        let mut updated = app.inbox.items.clone();
+        updated[0].review.done_when = "Submitted criteria".into();
+        updated[0].review_revision = 1;
+        inbox::land(&mut app, updated);
+        let Some(Overlay::Inbox(view)) = &app.modals.overlay else {
+            panic!();
+        };
+        assert_eq!(
+            view.details.as_ref().unwrap().inputs[0].as_str(),
+            "New unsaved criteria"
+        );
+        assert_eq!(
+            view.details.as_ref().unwrap().revision,
+            0,
+            "new form keeps its revision so a conflict cannot silently overwrite"
+        );
+        let mut duplicate = vec![];
+        handle_server_event(
+            &mut app,
+            ServerEvent::Ack {
+                req_id,
+                created: None,
+            },
+            &mut duplicate,
+        );
+        assert!(duplicate.is_empty());
     });
 }

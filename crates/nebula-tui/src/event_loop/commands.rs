@@ -607,7 +607,7 @@ pub(crate) fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<C
                     effort.filter(|e| e != crate::config::DEFAULT_CHOICE),
                     &crate::config::Config::load(),
                 )
-                .with_inbox(back.launch.inbox.clone())
+                .with_inbox(back.launch.inbox.clone(), back.launch.inbox_review_revision)
                 .with_issue(back.launch.issue.clone())
                 .with_pr(back.launch.pr.clone())
                 // The Claude row's `Tab` toggle rides the pick: the box

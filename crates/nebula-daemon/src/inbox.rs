@@ -19,10 +19,15 @@ impl Daemon {
             return Ok(EntityId::Agent(session));
         }
         ensure!(!item.archived, "inbox item is archived");
+        ensure!(
+            item.review_revision == draft.review_revision,
+            "task details changed; refresh and review before launch"
+        );
         let save_id = id.clone();
         let saved = draft.clone();
         self.store_blocking(move |s| s.save_inbox(&save_id, &saved))
             .await?;
+        let prompt = nebula_core::inbox_launch_prompt(&draft.instructions, &item.review);
         let result = self
             .create_agent_for_inbox(
                 CreateAgentSpec {
@@ -34,7 +39,7 @@ impl Daemon {
                     effort: draft.effort,
                     auto_title: true,
                     cloud_prompt: None,
-                    starting_prompt: Some(draft.instructions),
+                    starting_prompt: Some(prompt),
                     pr_url: None,
                     issue_url: item.source_url,
                     role: AgentRole::Worker,

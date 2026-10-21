@@ -27,6 +27,28 @@ The reviewer rechecked the fixes for lock ordering, recursive gate acquisition, 
 
 After all review fixes, `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` passed. The complete workspace run under the same child reaper finished with **1,848 passed, 10 failed, 2 ignored**: all **38 IPC/PTY tests**, **361 daemon unit tests**, the real inbox TUI test and **1,323 TUI unit tests** passed. The same nine baseline splash-fixture failures and one baseline folder-detection failure remain; no new failure appeared. A final `cargo test --workspace inbox` returned success with **18 passed**, including all four new review regressions. Runtime isolation and stub agents were unchanged.
 
+## Acceptance criteria and outcome milestone
+
+Starting point: verified clean `feat/manual-agent-inbox` at `f9695ac2f1183190bb8848de8e0a27a73ac3b110`. The environment remained available and no completed inbox work was recreated. Runtime checks use a new absolute `/tmp/nebula-outcome-checks/{data,runtime}`, unset `NEBULA_CONFIG_FILE`, stub agents and the same process-local child reaper.
+
+Migration 31 preserves populated migration-30 rows, legacy draft JSON, immutable imported text and deleted-session tombstones. It adds initially empty user-reviewed criteria/constraints/verification/note fields, an explicit default Needs review outcome, append-only complete review snapshots and an independent atomic launch snapshot. Binary record shapes change, so both IPC version and compatibility floor move to 54 in accordance with repository conventions; v53 peers are refused at the unchanged handshake. The earlier v52/v53 evidence above describes the initial milestone only.
+
+The current focused suite covers:
+
+- Populated 30→31 upgrade and old JSON defaults; SQLite reopen and real daemon restart retain source, reviewed fields, decisions, audit and launch snapshots.
+- Approved prompt construction includes criteria/constraints/verification exactly once and excludes imported source plus result opinions; no automatic shell execution. A disposable command-marker path remains absent after save, launch and restart.
+- Stale launch approvals fail before session creation. Harness/preset/project/worktree picker round trips preserve a nonzero reviewed revision. Known launch harness/model/effort values are recorded without claiming provider-effective defaults.
+- Real simultaneous review clients produce one revision winner and one conflict; simultaneous duplicate retries both acknowledge the same single audit event. Late replay cannot revert newer decisions. The latest 20 snapshots are bounded on the wire while all revisions remain in SQLite.
+- Keyboard/mouse field, outcome, save and cancel parity; pending-save freeze; failed-save retention; retry identity; late/duplicate acknowledgements; closing a submitted editor refreshes on success without discarding a newer editor.
+- All four explicit outcomes remain independent of archive, agent status changes, session deletion and session launch. Review notes/results are user-entered, not automatically ingested test results or model judgments.
+- The real PTY-driven TUI test edits criteria/constraints/verification, cancels and saves instructions without launch, explicitly launches, revisits the task, then explicitly saves Accepted with a review note and revisits the session.
+
+Fresh focused review found two P2 usability defects: independently saved instructions/criteria could exceed the combined launch limit, and a cancelled submitted details form ignored its later success acknowledgement. Both were fixed and rechecked, with exact-limit/+1 and cancel/new-form/duplicate-Ack regressions. Self-review also caught a P2 revision-reset defect when harness/preset pickers reconstructed QuickLaunch; revision 7 now survives both paths, with regressions in the existing dispatch tests. The reviewer rechecked the affected paths. No remaining concrete milestone defect was confirmed; arbitrary-hard-crash prompt delivery remains outside the verified guarantees.
+
+Final post-picker validation passed formatting, strict Clippy (`--workspace --all-targets -- -D warnings`) and **31 inbox-focused tests**. The full workspace run finished with **1,861 passed, 10 failed, 2 ignored**. All **40 IPC/PTY tests**, **366 daemon unit tests**, **40 core unit tests**, the real inbox TUI test and **1,327 TUI unit tests** passed. The same nine baseline splash-fixture failures and the sandbox-sensitive folder-detection failure remain. There was no new failure. The full command returns exit 101 because of those known failures; this is not a fully green standard suite. These checks cover the repository's formatting/lint/test gate using a child reaper for the documented container cleanup behavior.
+
+Logs: `/tmp/nebula-outcome-{check,focused,lint,validation,final-validation}.log`; final post-picker validation uses `/tmp/nebula-outcome-complete.log`.
+
 ## Acceptance evidence
 
 | Requirement | Evidence |
@@ -40,12 +62,12 @@ After all review fixes, `cargo fmt --all -- --check` and `cargo clippy --workspa
 | Repeated/concurrent launch creates one session | Two real IPC clients race a launch; retry after restart returns the same ID; atomic link/agent transaction test; held spawn gate blocks publication while Attach contends |
 | Linked session can be revisited | Ordinary Attach/Input integration test and real TUI Session action |
 | A finished turn does not resolve the task | Store test changes the linked agent to Finished and verifies the task stays active |
-| Protocol compatibility and bounded replies | v51 request-gating/disconnect unit test; old subscriber integration check; >4 MiB inbox list integration test |
+| Protocol compatibility and bounded replies | v54 floor and v53 handshake refusal; older-daemon request-gating/disconnect unit test; request-only subscriber check; >4 MiB inbox list integration test |
 
 ## Limits and follow-up
 
 The inbox selects existing worktrees; create a new checkout through Nebula's existing controls first. Independently archived linked sessions use the existing session restore controls. An OS crash between committing a launch link and delivering the one-shot prompt has ambiguous delivery; the record remains linked to its one session and does not create a replacement. Exactly-once prompt delivery across arbitrary hard crashes is not claimed.
 
-Review the fork's existing permissive harness defaults before any real-agent trial. Classification, suggestions, evaluation records and provider-specific routing remain later milestones. The standard suite is not fully green until its pre-existing splash fixtures and environment-sensitive checks are addressed separately. GPU performance, desktop-terminal/Omarchy compatibility and the tmux-based latency harness were not tested here (`tmux` is absent). Next steps are code review, a local stub-agent smoke test on the user's desktop, permission-policy review, then explicit authorization before pushing or deploying.
+Review the fork's existing permissive harness defaults before any real-agent trial. Classification, automatic suggestions/evaluation ingestion, billing estimates, learned routing and provider-specific routing remain later milestones. Manual reviewed outcomes and audit snapshots are implemented. The standard suite is not fully green until its pre-existing splash fixtures and environment-sensitive checks are addressed separately. GPU performance, desktop-terminal/Omarchy compatibility and the tmux-based latency harness were not tested here (`tmux` is absent). Next steps are code review, a local stub-agent smoke test on the user's desktop, permission-policy review, then explicit authorization before pushing or deploying.
 
 Post-review logs are `/tmp/nebula-inbox-review-{before,before-ui,tests,validation,focused}.log`. Full initial-run logs remain in the cloud environment under `/tmp/nebula-inbox-{baseline-isolated,baseline-libs,baseline-tui,baseline-e2e-tui,ci,full-tests,final-validation}.log`.

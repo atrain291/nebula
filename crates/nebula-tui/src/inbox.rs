@@ -11,13 +11,17 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+mod details;
+pub use details::DetailsEditor;
 
-pub(crate) const FOOTER: &str = "^A: capture  Enter: review  ^O: session  ^D: archive/restore  ^L: archived  ^R: refresh  Esc: clear/close";
+pub(crate) const FOOTER: &str = "^A: capture  Enter: launch review  ^E: criteria/outcome  ^O: session  ^D: archive  ^L: archived  ^R: refresh  Esc: close";
 
 #[derive(Debug, Default)]
 pub struct InboxState {
     pub items: Vec<InboxItem>,
     pub listing: Option<(u64, Vec<InboxItem>)>,
+    /// Submitted review saves can outlive their editor (Esc/navigation).
+    pub review_saves: std::collections::HashSet<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +34,11 @@ pub enum Action {
     Refresh,
     SaveCapture,
     CancelCapture,
+    Details,
+    SaveDetails,
+    CancelDetails,
+    Field(usize),
+    Outcome(nebula_core::InboxOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +51,7 @@ pub struct InboxView {
     pub capture: Option<(InboxId, TextInput)>,
     /// Freeze submitted source until its capture RPC confirms or fails.
     pub capture_saving: Option<u64>,
+    pub details: Option<DetailsEditor>,
     pub archived: bool,
     pub scroll: u16,
 }
@@ -56,6 +66,7 @@ impl InboxView {
             buttons: vec![],
             capture: None,
             capture_saving: None,
+            details: None,
             archived: false,
             scroll: 0,
         }
@@ -148,7 +159,8 @@ fn send_capture(
     req_id
 }
 
-pub(crate) fn capture_succeeded(app: &mut App, req_id: u64) {
+pub(crate) fn capture_succeeded(app: &mut App, req_id: u64, out: &mut Vec<ClientRequest>) {
+    details::succeeded(app, req_id, out);
     if let Some(Overlay::Inbox(view)) = &mut app.modals.overlay {
         if view.capture_saving == Some(req_id) {
             // Ack proves the submitted source is durable. A subsequent
@@ -161,6 +173,7 @@ pub(crate) fn capture_succeeded(app: &mut App, req_id: u64) {
 }
 
 pub(crate) fn capture_failed(app: &mut App, req_id: u64) {
+    details::failed(app, req_id);
     if let Some(Overlay::Inbox(view)) = &mut app.modals.overlay {
         if view.capture_saving == Some(req_id) {
             view.capture_saving = None;
@@ -170,6 +183,9 @@ pub(crate) fn capture_failed(app: &mut App, req_id: u64) {
 }
 
 pub(crate) fn act(app: &mut App, action: Action, out: &mut Vec<ClientRequest>) {
+    if details::act(app, action, out) {
+        return;
+    }
     let Some(Overlay::Inbox(view)) = &mut app.modals.overlay else {
         return;
     };
@@ -221,6 +237,11 @@ pub(crate) fn act(app: &mut App, action: Action, out: &mut Vec<ClientRequest>) {
             }
         }
         Action::Review => review(app),
+        Action::Details
+        | Action::SaveDetails
+        | Action::CancelDetails
+        | Action::Field(_)
+        | Action::Outcome(_) => unreachable!("details actions handled above"),
     }
     app.chrome.dirty = true;
 }
@@ -269,6 +290,7 @@ fn review(app: &mut App) {
         launch.effort = draft.effort.clone();
     }
     launch.inbox = Some(item.id);
+    launch.inbox_review_revision = item.review_revision;
     launch.under = ModalUnder::of(app.modals.overlay.as_ref());
     let text = item
         .draft
@@ -297,6 +319,7 @@ pub(crate) fn save_review(app: &mut App, out: &mut Vec<ClientRequest>) -> bool {
     };
     let text = prompt.input.as_str().to_string();
     let draft = InboxDraft {
+        review_revision: launch.inbox_review_revision,
         instructions: launch.compose(&text),
         worktree: worktree.clone(),
         kind: launch.kind,
@@ -337,6 +360,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     } else {
         key
     };
+    if details::key(app, key, out) {
+        return;
+    }
     let Some(Overlay::Inbox(view)) = &mut app.modals.overlay else {
         return;
     };
@@ -366,6 +392,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
             KeyCode::Char('l') if ctrl => Some(Action::Archived),
             KeyCode::Char('r') if ctrl => Some(Action::Refresh),
             KeyCode::Char('o') if ctrl => Some(Action::Session),
+            KeyCode::Char('e') if ctrl => Some(Action::Details),
             KeyCode::Enter => Some(Action::Review),
             KeyCode::PageDown => {
                 view.scroll = view.scroll.saturating_add(8);
@@ -395,6 +422,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     app.chrome.dirty = true;
 }
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
+    if details::paste(app, text) {
+        return true;
+    }
     let Some(Overlay::Inbox(view)) = &mut app.modals.overlay else {
         return false;
     };
@@ -422,6 +452,9 @@ pub(crate) fn handle_mouse(
     pos: Position,
     out: &mut Vec<ClientRequest>,
 ) {
+    if details::mouse(app, mouse, pos, out) {
+        return;
+    }
     let Some(Overlay::Inbox(view)) = &mut app.modals.overlay else {
         return;
     };
@@ -496,6 +529,13 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, mut view: InboxView, dimmed: bo
     );
     view.area = area;
     view.buttons.clear();
+    if view.details.is_some() {
+        details::draw(f, app, &mut view, inner);
+        if !dimmed {
+            app.modals.overlay = Some(Overlay::Inbox(view));
+        }
+        return;
+    }
     let parts = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -511,6 +551,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, mut view: InboxView, dimmed: bo
         vec![
             (" New ^A ", Action::Capture),
             (" Review Enter ", Action::Review),
+            (" Details ^E ", Action::Details),
             (" Session ^O ", Action::Session),
             (" Archive/restore ^D ", Action::Archive),
             (" Archived ^L ", Action::Archived),
@@ -602,6 +643,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, mut view: InboxView, dimmed: bo
                 Line::from(item.source_url.clone().unwrap_or_default()),
                 Line::from(""),
             ];
+            details::summary(&mut lines, item);
             if let Some(id) = &item.session {
                 lines.push(Line::from(format!("Session: {id} · ^O revisits")));
             }

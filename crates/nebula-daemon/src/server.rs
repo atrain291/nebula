@@ -245,12 +245,13 @@ impl ClientConnection {
                 let result = self.blocking_daemon(|d| d.store.list_inbox()).await;
                 match result {
                     Ok(items) => {
-                        // A bounded source/draft is < 90 KiB; 16 rows stay
-                        // comfortably inside the 4 MiB IPC frame ceiling.
-                        let pages = items.len().div_ceil(16).max(1);
+                        // Each bounded row includes at most 20 review snapshots.
+                        // One row per frame keeps even worst-case escaped text
+                        // comfortably inside the 4 MiB ceiling.
+                        let pages = items.len().max(1);
                         for page in 0..pages {
-                            let start = page * 16;
-                            let end = (start + 16).min(items.len());
+                            let start = page;
+                            let end = (start + 1).min(items.len());
                             self.send(ServerEvent::InboxItems {
                                 req_id,
                                 items: items[start..end].to_vec(),
@@ -281,6 +282,23 @@ impl ClientConnection {
                 let _gate = self.daemon.inbox_ops.lock().await;
                 let result = self
                     .blocking_daemon(move |d| d.store.save_inbox(&id, &draft))
+                    .await;
+                reply_done(&self.out_tx, req_id, result).await;
+                Ok(true)
+            }
+            ClientRequest::SaveInboxReview {
+                req_id,
+                id,
+                event_id,
+                expected_revision,
+                review,
+            } => {
+                let _gate = self.daemon.inbox_ops.lock().await;
+                let result = self
+                    .blocking_daemon(move |d| {
+                        d.store
+                            .save_inbox_review(&id, &event_id, expected_revision, &review)
+                    })
                     .await;
                 reply_done(&self.out_tx, req_id, result).await;
                 Ok(true)

@@ -2622,6 +2622,7 @@ mod tests {
         use crate::app::PromptKind;
         let quick = PromptKind::QuickPrompt(crate::quick_prompt::QuickLaunch {
             inbox: None,
+            inbox_review_revision: 0,
             target: crate::quick_prompt::QuickTarget::Worktree(nebula_core::WorktreeId::from(
                 "wt".to_string(),
             )),

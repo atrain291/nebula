@@ -346,6 +346,18 @@ const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );",
+    // 31: user-reviewed task criteria and append-only outcome/review audit.
+    "ALTER TABLE inbox ADD COLUMN review TEXT NOT NULL DEFAULT '{}';
+     ALTER TABLE inbox ADD COLUMN review_revision INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE inbox ADD COLUMN launch TEXT;
+     CREATE TABLE inbox_review_history (
+        event_id TEXT PRIMARY KEY,
+        inbox_id TEXT NOT NULL REFERENCES inbox(id),
+        revision INTEGER NOT NULL,
+        review TEXT NOT NULL,
+        saved_at INTEGER NOT NULL,
+        UNIQUE(inbox_id, revision)
+     );",
 ];
 
 pub struct Store {
@@ -561,9 +573,30 @@ impl Store {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         if let Some(id) = inbox {
+            let (review_json, revision, draft_json): (String, i64, String) = tx.query_row(
+                "SELECT review, review_revision, draft FROM inbox WHERE id = ?1",
+                [id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let review: nebula_core::InboxReview = serde_json::from_str(&review_json)?;
+            let draft: nebula_core::InboxDraft = serde_json::from_str(&draft_json)?;
+            anyhow::ensure!(
+                revision == draft.review_revision,
+                "task details changed; refresh and review before launch"
+            );
+            let launch = nebula_core::InboxLaunch {
+                review_revision: revision,
+                prompt: nebula_core::inbox_launch_prompt(&draft.instructions, &review),
+                review,
+                kind: a.kind,
+                custom_harness: a.custom_harness.clone(),
+                model: a.model.clone(),
+                effort: a.effort.clone(),
+                launched_at: now_ms(),
+            };
             anyhow::ensure!(tx.execute(
-                "UPDATE inbox SET session_id = ?2, updated_at = ?3 WHERE id = ?1 AND session_id IS NULL AND archived = 0",
-                params![id.as_str(), a.id.as_str(), now_ms()],
+                "UPDATE inbox SET session_id = ?2, updated_at = ?3, launch = ?4 WHERE id = ?1 AND session_id IS NULL AND archived = 0",
+                params![id.as_str(), a.id.as_str(), now_ms(), serde_json::to_string(&launch)?],
             )? == 1, "inbox item is archived or already launched");
         }
         tx.execute(
@@ -1745,6 +1778,7 @@ mod tests {
         [
             "agents",
             "inbox",
+            "inbox_review_history",
             "links",
             "pr_seen",
             "projects",

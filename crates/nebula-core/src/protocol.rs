@@ -11,14 +11,14 @@ use std::path::PathBuf;
 /// Bump on every protocol change. Additive changes keep
 /// [`MIN_COMPATIBLE_PROTOCOL`] where it is; breaking changes bump both.
 // Manual inbox requests and replies (gated at INBOX_PROTOCOL).
-pub const PROTOCOL_VERSION: u32 = 53;
+pub const PROTOCOL_VERSION: u32 = 54;
 
 /// Oldest IPC protocol this build can safely talk to.
 ///
 /// Compatibility is a range overlap: two peers can talk when each peer's
 /// `[MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION]` range includes at least one
 /// version the other peer also supports.
-pub const MIN_COMPATIBLE_PROTOCOL: u32 = 52;
+pub const MIN_COMPATIBLE_PROTOCOL: u32 = 54;
 
 /// First protocol whose daemon answers `ClientRequest::CheckWorktree`. A
 /// client asks only a daemon at least this new; an older one is never sent
@@ -549,6 +549,13 @@ pub enum ClientRequest {
         req_id: u64,
         id: crate::InboxId,
         draft: crate::InboxDraft,
+    },
+    SaveInboxReview {
+        req_id: u64,
+        id: crate::InboxId,
+        event_id: String,
+        expected_revision: i64,
+        review: crate::InboxReview,
     },
 }
 

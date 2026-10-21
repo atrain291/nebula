@@ -1114,6 +1114,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
     }
     let AgentLaunchDraft {
         inbox,
+        inbox_review_revision,
         worktree,
         kind,
         custom,
@@ -1256,6 +1257,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             req_id,
             id: inbox.expect("guarded inbox"),
             draft: nebula_core::InboxDraft {
+                review_revision: inbox_review_revision,
                 worktree: worktree.clone(),
                 kind,
                 custom_harness: custom.clone(),

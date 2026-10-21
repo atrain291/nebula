@@ -2217,6 +2217,7 @@ pub struct PlaceholderRows {
 pub struct AgentLaunchDraft {
     /// A durable task launch, preserving its identity through the shared creator.
     pub inbox: Option<nebula_core::InboxId>,
+    pub inbox_review_revision: i64,
     pub worktree: WorktreeId,
     pub kind: AgentKind,
     /// Registry id when `kind` is [`AgentKind::Custom`].
@@ -2272,6 +2273,7 @@ impl AgentLaunchDraft {
     ) -> Self {
         Self {
             inbox: None,
+            inbox_review_revision: 0,
             worktree,
             kind,
             custom: None,

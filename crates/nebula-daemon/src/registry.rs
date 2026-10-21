@@ -4943,6 +4943,7 @@ mod tests {
             .capture_inbox(&id, "Original task", None)
             .unwrap();
         let draft = nebula_core::InboxDraft {
+            review_revision: 0,
             instructions: "Approved first prompt".into(),
             worktree: worktree.id,
             kind: AgentKind::Claude,

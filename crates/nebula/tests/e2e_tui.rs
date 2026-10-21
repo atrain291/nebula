@@ -972,6 +972,16 @@ fn tui_inbox_capture_review_save_cancel_and_explicit_launch() {
     tui.wait_for_gone("Capture task");
     tui.wait_for_text("Original (read only)");
     tui.wait_for_text("Not approved yet");
+    tui.send(&[0x05]); // task details
+    tui.wait_for_text("Editing Done when");
+    tui.type_str("User confirms the result");
+    tui.send(b"\t");
+    tui.type_str("Keep unrelated work");
+    tui.send(b"\t");
+    tui.type_str("Describe tests; no automatic execution");
+    tui.send(&[0x13]);
+    tui.wait_for_gone("Editing Verification plan");
+    tui.wait_for_text("User confirms the result");
     tui.send(ENTER);
     tui.wait_for_text("Inbox review");
     // Cancel must return to the captured task with no session.
@@ -996,6 +1006,15 @@ fn tui_inbox_capture_review_save_cancel_and_explicit_launch() {
     tui.send(b"B");
     tui.wait_for_text("Task inbox");
     tui.wait_for_text("Launched · task stays open");
+    tui.wait_for_text("Needs review");
+    tui.send(&[0x05]);
+    tui.wait_for_text("Editing Done when");
+    tui.send(&[0x0f]); // explicit user acceptance
+    tui.send(b"\t\t\t");
+    tui.type_str("Manually reviewed the session results");
+    tui.send(&[0x13]);
+    tui.wait_for_text("Outcome: Accepted");
+    tui.wait_for_text("Manually reviewed the session results");
     tui.send(&[0x0f]);
     tui.wait_for_gone("Task inbox");
     tui.wait_for_text("inbox task");

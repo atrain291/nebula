@@ -244,6 +244,7 @@ pub fn split_connection(conn: Connection) -> IpcChannels {
                 | ClientRequest::CaptureInbox { req_id, .. }
                 | ClientRequest::SaveInbox { req_id, .. }
                 | ClientRequest::ArchiveInbox { req_id, .. }
+                | ClientRequest::SaveInboxReview { req_id, .. }
                 | ClientRequest::LaunchInbox { req_id, .. } => Some(*req_id),
                 _ => None,
             };
@@ -252,7 +253,7 @@ pub fn split_connection(conn: Connection) -> IpcChannels {
                     let _ = gate_tx
                         .send(ServerEvent::Error {
                             req_id: Some(req_id),
-                            message: "task inbox needs a v52 daemon; reload Nebula".into(),
+                            message: "task inbox needs a v53 daemon; reload Nebula".into(),
                         })
                         .await;
                     continue;
@@ -1829,7 +1830,7 @@ mod inbox_compat_tests {
         let mut channels = split_connection(Connection {
             stream: client,
             daemon_pid: 0,
-            protocol_version: 51,
+            protocol_version: 53,
         });
         channels
             .tx

@@ -53,6 +53,7 @@ pub enum QuickTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuickLaunch {
     pub inbox: Option<nebula_core::InboxId>,
+    pub inbox_review_revision: i64,
     pub target: QuickTarget,
     pub kind: AgentKind,
     /// Registry id when `kind` is [`AgentKind::Custom`].
@@ -330,6 +331,7 @@ impl QuickLaunch {
             effort,
             preset: None,
             inbox: None,
+            inbox_review_revision: 0,
             issue: None,
             pr: None,
             under: None,
@@ -339,8 +341,9 @@ impl QuickLaunch {
 
     /// Keep the task's stable identity through a harness or preset pick.
     /// Inbox launches use local, existing worktrees.
-    pub fn with_inbox(mut self, inbox: Option<nebula_core::InboxId>) -> Self {
+    pub fn with_inbox(mut self, inbox: Option<nebula_core::InboxId>, revision: i64) -> Self {
         self.inbox = inbox;
+        self.inbox_review_revision = revision;
         self.cloud = false;
         self
     }
@@ -484,7 +487,10 @@ impl QuickLaunch {
     /// The line under the title: what Enter will send.
     pub fn label(&self) -> String {
         if self.inbox.is_some() {
-            return "approved instructions · ^S saves review · Enter approves and launches".into();
+            return format!(
+                "approved instructions + saved criteria v{} · ^S saves · Enter launches",
+                self.inbox_review_revision
+            );
         }
         match (&self.preset, &self.issue) {
             (Some(preset), issue) => {

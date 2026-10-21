@@ -457,6 +457,7 @@ mod tests {
             let back = QuickReturn {
                 launch: QuickLaunch {
                     inbox: None,
+                    inbox_review_revision: 0,
                     target: crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
                     kind: AgentKind::Cursor,
                     custom: None,
@@ -607,6 +608,7 @@ mod tests {
                 let back = QuickReturn {
                     launch: QuickLaunch {
                         inbox: None,
+                        inbox_review_revision: 0,
                         target: crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
                         kind: AgentKind::Codex,
                         custom: None,
