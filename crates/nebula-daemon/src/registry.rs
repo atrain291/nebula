@@ -176,6 +176,9 @@ pub struct Daemon {
     /// Shared with the hook HTTP server, which reads agent rows to decide
     /// auto-title injection.
     pub store: Arc<Store>,
+    /// Serializes task review/archive/launch; acquired before the ordinary
+    /// creator and its spawn gate, never from inside a store/map lock.
+    pub(crate) inbox_ops: tokio::sync::Mutex<()>,
     /// Entity/status deltas fanned out to every subscribed client.
     pub events: broadcast::Sender<ServerEvent>,
     /// Every session the registry installs — a spawn, a respawn, a prewarm
@@ -268,6 +271,7 @@ impl Daemon {
             transcripts: Mutex::new(HashMap::new()),
             pending_moves: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
+            inbox_ops: tokio::sync::Mutex::new(()),
             prewarm_sweep: Mutex::new(None),
             resumes: Mutex::new(HashMap::new()),
             finished_runs: Mutex::new(HashMap::new()),

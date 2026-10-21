@@ -957,3 +957,46 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
         assert_eq!(*row, format!("row {}", first + i), "{text}");
     }
 }
+
+#[test]
+fn tui_inbox_capture_review_save_cancel_and_explicit_launch() {
+    let mut tui = TuiHarness::spawn();
+    let repo = tui.make_repo("inbox-demo");
+    add_project(&mut tui, &repo, "inbox-demo");
+    tui.send(b"B");
+    tui.wait_for_text("Task inbox");
+    tui.send(&[0x01]);
+    tui.wait_for_text("Capture task");
+    tui.type_str("Original task from the inbox");
+    tui.send(ENTER);
+    tui.wait_for_gone("Capture task");
+    tui.wait_for_text("Original (read only)");
+    tui.wait_for_text("Not approved yet");
+    tui.send(ENTER);
+    tui.wait_for_text("Inbox review");
+    // Cancel must return to the captured task with no session.
+    tui.send(ESC);
+    tui.wait_for_gone("Inbox review");
+    tui.wait_for_text("Captured · no session launched");
+    tui.send(ENTER);
+    tui.wait_for_text("Inbox review");
+    // The regular readline editor replaces the original with approved text.
+    tui.send(&[0x01, 0x0b]);
+    tui.type_str("Approved instructions for the agent");
+    tui.send(&[0x13]);
+    tui.wait_for_gone("Inbox review");
+    tui.wait_for_text("Reviewed · no session launched");
+    tui.wait_for_text("Approved instructions for the agent");
+    tui.send(ENTER);
+    tui.wait_for_text("Inbox review");
+    tui.send(ENTER);
+    tui.wait_for_gone("Inbox review");
+    tui.wait_for_gone("Task inbox");
+    tui.wait_for_text("inbox task");
+    tui.send(b"B");
+    tui.wait_for_text("Task inbox");
+    tui.wait_for_text("Launched · task stays open");
+    tui.send(&[0x0f]);
+    tui.wait_for_gone("Task inbox");
+    tui.wait_for_text("inbox task");
+}

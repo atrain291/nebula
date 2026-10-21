@@ -4,6 +4,7 @@ pub mod config;
 pub mod git;
 pub mod handoff;
 pub mod hooks;
+mod inbox;
 pub mod lifecycle;
 pub mod metrics;
 pub mod open_files;

@@ -25,6 +25,14 @@ impl Daemon {
     }
 
     pub(crate) async fn create_agent(self: &Arc<Self>, spec: CreateAgentSpec) -> Result<EntityId> {
+        self.create_agent_for_inbox(spec, None).await
+    }
+
+    pub(crate) async fn create_agent_for_inbox(
+        self: &Arc<Self>,
+        spec: CreateAgentSpec,
+        inbox: Option<nebula_core::InboxId>,
+    ) -> Result<EntityId> {
         let CreateAgentSpec {
             worktree: worktree_id,
             name,
@@ -116,7 +124,12 @@ impl Daemon {
             id: adopted
                 .as_ref()
                 .map(|e| e.agent_id.clone())
-                .unwrap_or_else(AgentId::generate),
+                .unwrap_or_else(|| {
+                    inbox
+                        .as_ref()
+                        .map(|id| AgentId(id.0.clone()))
+                        .unwrap_or_else(AgentId::generate)
+                }),
             worktree_id,
             name: if name.trim().is_empty() {
                 "agent".into()
@@ -165,12 +178,14 @@ impl Daemon {
         let pr_to_insert = pr_url.clone();
         let issue_to_insert = issue_url.clone();
         let prompt_to_insert = prompt_entry.clone();
+        let inbox_to_insert = inbox.clone();
         self.store_blocking(move |store| {
-            store.insert_agent_with_launch_context(
+            store.insert_agent_for_inbox(
                 &agent_to_insert,
                 auto_title,
                 pr_to_insert.as_deref(),
                 issue_to_insert.as_deref(),
+                inbox_to_insert.as_ref(),
             )?;
             if let Some(entry) = &prompt_to_insert {
                 store.push_prompt(&agent_to_insert.id, entry)?;

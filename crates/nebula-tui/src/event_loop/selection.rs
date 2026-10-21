@@ -1113,6 +1113,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         return;
     }
     let AgentLaunchDraft {
+        inbox,
         worktree,
         kind,
         custom,
@@ -1225,6 +1226,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         (true, Some(name)) => name,
         (true, None) => app.default_session_name("agent"),
     };
+    let is_inbox = inbox.is_some();
     let cloud = cloud_prompt.is_some();
     let with_first_prompt = starting_prompt.is_some();
     let req_id = app.alloc_req_id(intent);
@@ -1250,6 +1252,18 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
                 starting_prompt,
             }
         }
+        None if inbox.is_some() => ClientRequest::LaunchInbox {
+            req_id,
+            id: inbox.expect("guarded inbox"),
+            draft: nebula_core::InboxDraft {
+                worktree: worktree.clone(),
+                kind,
+                custom_harness: custom.clone(),
+                model,
+                effort,
+                instructions: starting_prompt.clone().unwrap_or_default(),
+            },
+        },
         None => ClientRequest::CreateAgent {
             req_id,
             worktree: worktree.clone(),
@@ -1265,6 +1279,9 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             role: nebula_core::AgentRole::Worker,
         },
     });
+    if is_inbox {
+        crate::inbox::refresh(app, out);
+    }
     // The create consumes (or, off-spec, discards) the worktree's warm
     // Claude slot; refill it so the next create is instant too. A cloud
     // launch, and any launch carrying a STARTING PROMPT (a preset, the

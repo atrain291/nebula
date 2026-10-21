@@ -13,6 +13,8 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 
+mod inbox;
+
 const MIGRATIONS: &[&str] = &[
     // 1: initial schema
     "
@@ -332,6 +334,18 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'worker';
     ",
+    // 30: independent task lifecycle; source and approved draft are distinct.
+    // Session links deliberately survive project/worktree/session deletion.
+    "CREATE TABLE inbox (
+        id TEXT PRIMARY KEY,
+        original TEXT NOT NULL,
+        source_url TEXT,
+        draft TEXT,
+        archived INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT UNIQUE,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );",
 ];
 
 pub struct Store {
@@ -533,7 +547,26 @@ impl Store {
         pr_url: Option<&str>,
         issue_url: Option<&str>,
     ) -> Result<()> {
-        self.conn.lock().execute(
+        self.insert_agent_for_inbox(a, auto_title, pr_url, issue_url, None)
+    }
+
+    pub(crate) fn insert_agent_for_inbox(
+        &self,
+        a: &Agent,
+        auto_title: bool,
+        pr_url: Option<&str>,
+        issue_url: Option<&str>,
+        inbox: Option<&nebula_core::InboxId>,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        if let Some(id) = inbox {
+            anyhow::ensure!(tx.execute(
+                "UPDATE inbox SET session_id = ?2, updated_at = ?3 WHERE id = ?1 AND session_id IS NULL AND archived = 0",
+                params![id.as_str(), a.id.as_str(), now_ms()],
+            )? == 1, "inbox item is archived or already launched");
+        }
+        tx.execute(
             "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, cloud_session_id, pr_url, issue_url, custom_harness, role)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
@@ -559,6 +592,7 @@ impl Store {
                 a.role.as_str(),
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1710,6 +1744,7 @@ mod tests {
     fn table_names_without_workspaces() -> Vec<String> {
         [
             "agents",
+            "inbox",
             "links",
             "pr_seen",
             "projects",

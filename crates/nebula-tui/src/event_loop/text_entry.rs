@@ -31,6 +31,9 @@ pub(crate) fn paste_into_overlay(app: &mut App, text: &str) -> bool {
     // The ISSUE EDITOR's field under the caret, or either modal's `/`
     // FILTER ROW while it has the caret — resolved against the rows, so
     // the cursor lands on the best match as a typed letter's would.
+    if matches!(&app.modals.overlay, Some(Overlay::Inbox(_))) {
+        return crate::inbox::paste(app, text);
+    }
     if matches!(&app.modals.overlay, Some(Overlay::Issues(_))) {
         return crate::issues::paste(app, text);
     }

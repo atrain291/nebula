@@ -296,3 +296,6 @@ pub async fn run_app() -> Result<Option<crate::hosts::HostEntry>> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod inbox_tests;

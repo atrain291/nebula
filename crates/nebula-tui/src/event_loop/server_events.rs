@@ -4,6 +4,16 @@ use super::*;
 
 pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRequest>) {
     match event {
+        ServerEvent::InboxItems {
+            req_id,
+            items,
+            complete,
+        } => {
+            if complete {
+                app.requests.pending.remove(&req_id);
+            }
+            crate::inbox::land_chunk(app, req_id, items, complete);
+        }
         event @ ServerEvent::Snapshot { .. } => handle_snapshot_event(app, event, out),
         event @ ServerEvent::Scrollback { .. }
         | event @ ServerEvent::Output { .. }

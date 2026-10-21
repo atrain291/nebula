@@ -52,6 +52,7 @@ pub enum QuickTarget {
 /// starts from the `quick_prompt_kind` SETTING again.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuickLaunch {
+    pub inbox: Option<nebula_core::InboxId>,
     pub target: QuickTarget,
     pub kind: AgentKind,
     /// Registry id when `kind` is [`AgentKind::Custom`].
@@ -99,6 +100,7 @@ pub struct QuickLaunch {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModalUnder {
     Issues(Box<crate::issues::IssuesView>),
+    Inbox(Box<crate::inbox::InboxView>),
     PullRequests(Box<crate::pr_modal::PullRequestsView>),
 }
 
@@ -107,6 +109,7 @@ impl ModalUnder {
     pub fn of(overlay: Option<&Overlay>) -> Option<Self> {
         match overlay? {
             Overlay::Issues(view) => Some(Self::Issues(Box::new(view.clone()))),
+            Overlay::Inbox(view) => Some(Self::Inbox(Box::new(view.clone()))),
             Overlay::PullRequests(view) => Some(Self::PullRequests(Box::new(view.clone()))),
             _ => None,
         }
@@ -116,6 +119,7 @@ impl ModalUnder {
     pub fn reopen(self, app: &mut App) {
         match self {
             Self::Issues(view) => crate::issues::reopen(app, *view),
+            Self::Inbox(view) => crate::inbox::reopen(app, *view),
             Self::PullRequests(view) => crate::pr_modal::reopen(app, *view),
         }
     }
@@ -217,7 +221,7 @@ pub(crate) fn draft_of(prompt: &PromptDialog) -> Option<QuickDraft> {
     let PromptKind::QuickPrompt(launch) = &prompt.kind else {
         return None;
     };
-    (!prompt.input.trim().is_empty()).then(|| QuickDraft {
+    (launch.inbox.is_none() && !prompt.input.trim().is_empty()).then(|| QuickDraft {
         launch: launch.clone(),
         input: prompt.input.clone(),
     })
@@ -227,7 +231,7 @@ pub(crate) fn draft_of(prompt: &PromptDialog) -> Option<QuickDraft> {
 /// owed back, with the text that was in it. The HARDWIRED UNLOCK is the
 /// only way out of a picker that does not hand the box back itself.
 pub(crate) fn draft_of_return(back: &QuickReturn) -> Option<QuickDraft> {
-    (!back.text.trim().is_empty()).then(|| QuickDraft {
+    (back.launch.inbox.is_none() && !back.text.trim().is_empty()).then(|| QuickDraft {
         launch: back.launch.clone(),
         input: TextInput::multiline_with_text(back.text.clone()),
     })
@@ -325,6 +329,7 @@ impl QuickLaunch {
             model,
             effort,
             preset: None,
+            inbox: None,
             issue: None,
             pr: None,
             under: None,
@@ -332,9 +337,15 @@ impl QuickLaunch {
         }
     }
 
-    /// The same launch, standing on the modal `under` (or on none). What
-    /// every picker's return trip does to the launch it rebuilt, so the box
-    /// comes back over the modal it was opened over.
+    /// Keep the task's stable identity through a harness or preset pick.
+    /// Inbox launches use local, existing worktrees.
+    pub fn with_inbox(mut self, inbox: Option<nebula_core::InboxId>) -> Self {
+        self.inbox = inbox;
+        self.cloud = false;
+        self
+    }
+
+    /// Keep the modal the box stands on through its picker round trip.
     pub fn with_under(mut self, under: Option<ModalUnder>) -> Self {
         self.under = under;
         self
@@ -374,7 +385,7 @@ impl QuickLaunch {
     /// context beside a cloud task — so their `Tab` picker offers no
     /// toggle. (A preset does not count: the `Tab` pick clears it.)
     pub fn takes_cloud(&self) -> bool {
-        self.issue.is_none() && self.pr.is_none()
+        self.issue.is_none() && self.pr.is_none() && self.inbox.is_none()
     }
 
     /// The task Enter sends when the box is empty: an ISSUE SESSION's box
@@ -394,7 +405,7 @@ impl QuickLaunch {
     /// command line, so its empty box is a change of mind. (An ISSUE
     /// SESSION's empty box is `default_task`'s: the issue is the task.)
     pub fn launches_empty(&self) -> bool {
-        !self.cloud
+        !self.cloud && self.inbox.is_none()
     }
 
     /// The launch an AGENT PRESET describes: its harness, its pinned
@@ -449,7 +460,12 @@ impl QuickLaunch {
             .chain(self.model.as_deref())
             .chain(self.effort.as_deref())
             .collect();
-        let mut head = vec!["Quick prompt".to_string()];
+        let mut head = vec![if self.inbox.is_some() {
+            "Inbox review"
+        } else {
+            "Quick prompt"
+        }
+        .to_string()];
         if let Some(issue) = &self.issue {
             head.push(format!("issue #{}", issue.number));
         }
@@ -467,6 +483,9 @@ impl QuickLaunch {
 
     /// The line under the title: what Enter will send.
     pub fn label(&self) -> String {
+        if self.inbox.is_some() {
+            return "approved instructions · ^S saves review · Enter approves and launches".into();
+        }
         match (&self.preset, &self.issue) {
             (Some(preset), issue) => {
                 let (sends, empty) = match (preset.has_wrapping(), issue) {
@@ -500,6 +519,9 @@ impl QuickLaunch {
     /// matched on: the same aim is the same box reopened, so the whole of
     /// it comes back.
     pub fn aimed_like(&self, other: &Self) -> bool {
+        if self.inbox != other.inbox {
+            return false;
+        }
         let same_place = match (&self.target, &other.target) {
             (QuickTarget::Worktree(a), QuickTarget::Worktree(b)) => a == b,
             (
@@ -700,6 +722,10 @@ pub(crate) fn backdrop_box(back: &QuickReturn) -> PromptDialog {
 /// box is rebuilt so its title and frame follow the target, with the
 /// typed text and the caret exactly where they were.
 pub(crate) fn toggle_new_worktree(app: &mut App, launch: QuickLaunch, input: TextInput) {
+    if launch.inbox.is_some() {
+        app.chrome.flash = Some("inbox: choose an existing worktree (^T)".into());
+        return;
+    }
     if launch.pr.is_some() {
         app.chrome.flash =
             Some("quick prompt: a PR session runs in the pull request's own checkout".into());

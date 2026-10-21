@@ -58,6 +58,10 @@ fn handle_overlay_mouse(
             crate::preset_overlays::handle_list_mouse(app, mouse, mouse_pos, out);
             true
         }
+        Overlay::Inbox(_) => {
+            crate::inbox::handle_mouse(app, mouse, mouse_pos, out);
+            true
+        }
         Overlay::Issues(_) => {
             crate::issues::handle_mouse(app, mouse, mouse_pos, out);
             true
@@ -150,7 +154,9 @@ fn handle_prompt_mouse(
         (&app.modals.overlay, mouse.kind)
     {
         if prompt.toggle_area.contains(mouse_pos) {
-            launcher::click_new_worktree(app);
+            if !crate::inbox::save_review(app, out) {
+                launcher::click_new_worktree(app);
+            }
             app.chrome.dirty = true;
             return true;
         }

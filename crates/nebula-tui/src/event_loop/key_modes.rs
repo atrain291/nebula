@@ -286,6 +286,7 @@ fn handle_global_action(
         | Action::Hosts
         | Action::AgentPresets
         | Action::QuickPrompt
+        | Action::Inbox
         | Action::Issues
         | Action::PullRequests
         | Action::SwitchBranch
@@ -353,6 +354,7 @@ fn handle_navigation_action(
         // the aim let go, or on a fresh worktree.
         Action::QuickPrompt if app.launcher_active() => launcher::open_box(app),
         Action::QuickPrompt => crate::quick_prompt::open_quick_prompt(app),
+        Action::Inbox => crate::inbox::open(app, out),
         Action::Issues => crate::issues::open_issues(app),
         Action::PullRequests => crate::pr_modal::open(app),
         Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),

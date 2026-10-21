@@ -915,8 +915,9 @@ fn apply_preset_to_quick_prompt(
         ));
         return;
     }
-    let launch_now = preset.skip_task && back.text.trim().is_empty();
+    let launch_now = back.launch.inbox.is_none() && preset.skip_task && back.text.trim().is_empty();
     let launch = crate::quick_prompt::QuickLaunch::of_preset(back.launch.target, preset, &cfg)
+        .with_inbox(back.launch.inbox)
         .with_issue(back.launch.issue)
         .with_pr(back.launch.pr)
         .with_under(back.launch.under);
