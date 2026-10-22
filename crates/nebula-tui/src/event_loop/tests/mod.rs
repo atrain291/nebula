@@ -5419,6 +5419,133 @@ fn status_change_resorts_and_selection_follows() {
     assert_eq!(app.nav.sel_session, 0, "selection followed agent-2");
 }
 
+/// A session finishing in ANOTHER project must not pull the view over
+/// there. The Projects column is a row index into a list sorted by
+/// recency, where a project with a turn under way counts as "now". When
+/// the finish is stamped at (or a hair past) the TUI's own clock — the
+/// daemon stamped it in the same millisecond the event was handled, or
+/// its clock runs a little ahead — the finished project briefly ties or
+/// beats the working one. The reconcile on the event re-seats the cursor
+/// for that order, and a moment later, with no event at all, the clock
+/// moves on and the order flips back: the same row index now names the
+/// project that just finished. Its session got the highlight while the
+/// pane went on showing the prompt just sent — the swap Cody saw when
+/// the done sound rang. The order must not move on the clock alone.
+#[test]
+fn a_finish_in_another_project_never_moves_the_view_there() {
+    use nebula_core::{AgentStatus, ProjectId};
+    let mut app = App::new();
+    seed_tree(&mut app);
+    seed_second_project(&mut app);
+    let now = crate::app::now_ms();
+    let flip = |agent: &str, status: AgentStatus, changed_at: i64| ServerEvent::StatusChanged {
+        agent: AgentId(agent.into()),
+        status,
+        changed_at,
+        unseen: false,
+    };
+    // An earlier prompt still running over in `nebula`, and the one just
+    // sent here in `demo`.
+    hse(&mut app, flip("a2", AgentStatus::Running, now - 60_000));
+    hse(&mut app, flip("a1", AgentStatus::Running, now - 1_000));
+    let demo = ProjectId("p1".into());
+    let mut out = Vec::new();
+    assert!(select_project_row_by_id(&mut app, &demo));
+    restore_context(&mut app, &mut out);
+    app.pane.term = Some(AttachedTerm::new(
+        SessionRef::Agent(AgentId("a1".into())),
+        40,
+        10,
+    ));
+    assert_eq!(
+        app.selected_session().map(|a| a.name),
+        Some("agent-1".into())
+    );
+
+    // The other project's turn ends, stamped just ahead of this clock.
+    hse(
+        &mut app,
+        flip("a2", AgentStatus::Finished, crate::app::now_ms() + 30),
+    );
+    assert_eq!(app.selected_project().map(|p| &p.id), Some(&demo));
+
+    // Nothing happens but time passing.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(
+        app.selected_project().map(|p| &p.id),
+        Some(&demo),
+        "the view stays on the project the user is in"
+    );
+    assert_eq!(
+        app.selected_session().map(|a| a.name),
+        Some("agent-1".into()),
+        "and the highlight stays on the session the pane shows"
+    );
+}
+
+/// The same for two checkouts of one project: a turn ending in the other
+/// one never takes the Worktrees cursor off the checkout being worked in.
+#[test]
+fn a_finish_in_another_checkout_never_moves_the_worktree_cursor() {
+    use nebula_core::{AgentStatus, Entity, Worktree, WorktreeId};
+    let mut app = App::new();
+    seed_tree(&mut app);
+    let feature = WorktreeId("w2".into());
+    hse(
+        &mut app,
+        ServerEvent::EntityUpserted {
+            entity: Entity::Worktree(Worktree {
+                id: feature.clone(),
+                project_id: nebula_core::ProjectId("p1".into()),
+                path: "/tmp/demo-feature".into(),
+                branch: "feature".into(),
+                is_main: false,
+                sort_order: 0,
+            }),
+        },
+    );
+    seed_agent_in(&mut app, "a2", &feature);
+    // A third checkout, so the two the test turns on are both below the
+    // pinned main row and sort against each other.
+    let other = WorktreeId("w3".into());
+    hse(
+        &mut app,
+        ServerEvent::EntityUpserted {
+            entity: Entity::Worktree(Worktree {
+                id: other.clone(),
+                project_id: nebula_core::ProjectId("p1".into()),
+                path: "/tmp/demo-other".into(),
+                branch: "other".into(),
+                is_main: false,
+                sort_order: 1,
+            }),
+        },
+    );
+    seed_agent_in(&mut app, "a3", &other);
+    let now = crate::app::now_ms();
+    let flip = |agent: &str, status: AgentStatus, changed_at: i64| ServerEvent::StatusChanged {
+        agent: AgentId(agent.into()),
+        status,
+        changed_at,
+        unseen: false,
+    };
+    hse(&mut app, flip("a3", AgentStatus::Running, now - 60_000));
+    hse(&mut app, flip("a2", AgentStatus::Running, now - 1_000));
+    let mut out = Vec::new();
+    assert!(select_worktree_by_id(&mut app, &feature, &mut out));
+
+    hse(
+        &mut app,
+        flip("a3", AgentStatus::Finished, crate::app::now_ms() + 30),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(
+        app.selected_worktree().map(|w| &w.id),
+        Some(&feature),
+        "the cursor stays on the checkout being worked in"
+    );
+}
+
 /// Confirming a worktree delete drops the row (and its agents)
 /// immediately — the daemon deletes in the background — and an Error
 /// reply for that request restores them where they were.
@@ -13244,6 +13371,184 @@ fn settings_view(app: &App) -> &crate::app::SettingsView {
         Some(Overlay::Settings(view)) => view,
         _ => panic!("settings closed"),
     }
+}
+
+/// Type `text` into whatever has the keys, one character at a time.
+fn type_keys(app: &mut App, text: &str, out: &mut Vec<ClientRequest>) {
+    for c in text.chars() {
+        press(app, KeyCode::Char(c), KeyModifiers::NONE, out);
+    }
+}
+
+/// `/` searches every tab at once: the cursor lands on the first match,
+/// wherever it lives, and the row keys act on it there. Esc drops the
+/// search and leaves the cursor on that row, in its own tab; a second Esc
+/// closes the overlay as usual.
+#[test]
+fn slash_searches_every_settings_tab() {
+    use crate::config::{setting_at, SettingKind, SETTINGS_TABS};
+    let mut app = App::new();
+    let mut out = Vec::new();
+    // From the tab strip, the way a fresh open lands.
+    press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
+    press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+    assert!(settings_view(&app).typing, "/ opens the field");
+    assert!(!settings_view(&app).on_tabs);
+    // Letters type now, so `s` and `q` don't close the overlay.
+    type_keys(&mut app, "color theme", &mut out);
+    let view = settings_view(&app);
+    assert!(view.searching());
+    assert_eq!(SETTINGS_TABS[view.tab].title, "Appearance");
+    assert_eq!(
+        setting_at(view.tab, view.selected).map(|s| s.kind),
+        Some(SettingKind::Theme)
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(
+        text.contains("/ color theme"),
+        "query in place of the rule:\n{text}"
+    );
+    assert!(text.contains("1 match"), "match count:\n{text}");
+    assert!(
+        text.contains(" Appearance\n") || text.contains(" Appearance "),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Search Enter attaches"),
+        "rows that don't match are gone:\n{text}"
+    );
+
+    // Enter hands the keys back to the rows, matches still listed.
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+    assert!(!settings_view(&app).typing);
+    assert!(settings_view(&app).searching());
+    // Esc drops the search, cursor still on the theme row.
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+    let view = settings_view(&app);
+    assert!(view.search.is_none());
+    assert_eq!(
+        setting_at(view.tab, view.selected).map(|s| s.kind),
+        Some(SettingKind::Theme)
+    );
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+    assert!(app.modals.overlay.is_none(), "then Esc closes as before");
+}
+
+/// The issue's case: find a hotkey and rebind it without walking the
+/// forty-row Hotkeys tab.
+#[test]
+fn settings_search_reaches_a_hotkey_and_enter_rebinds_it() {
+    let mut app = App::new();
+    let mut out = Vec::new();
+    open_settings_on(&mut app, 0, &mut out);
+    press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+    type_keys(&mut app, "duplicate", &mut out);
+    let duplicate = crate::keymap::ACTIONS
+        .iter()
+        .position(|a| a.label == "Duplicate session")
+        .unwrap();
+    let view = settings_view(&app);
+    assert!(view.is_hotkeys());
+    assert_eq!(view.selected, duplicate);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+    let view = settings_view(&app);
+    assert!(view.capturing(), "Enter on the match starts the rebind");
+    assert_eq!(view.capture.as_ref().unwrap().action, duplicate);
+}
+
+/// A row found by its chord stays listed after that chord changes: the
+/// matches hold until the query does, so unbinding the very key you
+/// searched for doesn't pull the row out from under the cursor.
+#[test]
+fn settings_search_keeps_a_row_whose_chord_just_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::config::with_config_path(dir.path().join("config.json"), || {
+        let mut app = App::new();
+        let mut out = Vec::new();
+        let fullscreen = crate::keymap::ACTIONS
+            .iter()
+            .position(|a| a.label == "Full-screen session")
+            .unwrap();
+        let chord = app.chrome.keymap.display_at(fullscreen);
+        open_settings_on(&mut app, 0, &mut out);
+        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        type_keys(&mut app, &chord, &mut out);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert_eq!(settings_view(&app).selected, fullscreen);
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE, &mut out);
+        assert_ne!(app.chrome.keymap.display_at(fullscreen), chord, "unbound");
+        let view = settings_view(&app);
+        assert!(view.searching());
+        assert!(
+            view.body_rows()
+                .iter()
+                .any(|(t, r)| *t == view.tab && r.index() == Some(fullscreen)),
+            "the row is still listed under the cursor"
+        );
+    });
+}
+
+/// A key that would leave nothing listed is refused, as a picker's
+/// type-ahead refuses it, and ⌫ on an empty field closes the search.
+#[test]
+fn settings_search_refuses_a_key_that_matches_nothing() {
+    let mut app = App::new();
+    let mut out = Vec::new();
+    open_settings_on(&mut app, 0, &mut out);
+    press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+    type_keys(&mut app, "themeqqq", &mut out);
+    let view = settings_view(&app);
+    assert_eq!(view.search.as_deref(), Some("theme"));
+    assert!(matches!(
+        view.notice,
+        Some((_, crate::app::NoticeLevel::Warn))
+    ));
+    for _ in 0.."theme".len() {
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+    }
+    assert!(
+        settings_view(&app).search.is_some(),
+        "an empty field stays open"
+    );
+    press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+    assert!(settings_view(&app).search.is_none());
+}
+
+/// Over the matches j/k walk across tabs, ↑ off the first goes back into
+/// the field, and asking for a tab drops the search.
+#[test]
+fn settings_search_results_walk_across_tabs() {
+    let mut app = App::new();
+    let mut out = Vec::new();
+    open_settings_on(&mut app, 0, &mut out);
+    press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+    // "session" is on almost every tab.
+    type_keys(&mut app, "session", &mut out);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+    let first = (settings_view(&app).tab, settings_view(&app).selected);
+    let mut tabs = std::collections::BTreeSet::new();
+    for _ in 0..200 {
+        tabs.insert(settings_view(&app).tab);
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+    }
+    assert!(tabs.len() > 2, "j crossed tabs: {tabs:?}");
+    while (settings_view(&app).tab, settings_view(&app).selected) != first {
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE, &mut out);
+    }
+    press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE, &mut out);
+    assert!(
+        settings_view(&app).typing,
+        "↑ off the first match is the field"
+    );
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+    assert!(
+        settings_view(&app).search.is_none(),
+        "Tab is a tab's own rows"
+    );
 }
 
 #[test]
@@ -21957,4 +22262,372 @@ fn archived_sessions_keep_the_question_with_show_all_worktrees_on() {
             c.action
         );
     });
+}
+
+/// `d` on the band of `feat` in [`parity_tree`], with the DELETE CHECK the
+/// loop's next turn sends: the app, and that check's req_id.
+fn delete_feat_with_check() -> (App, u64) {
+    let mut app = parity_tree();
+    let mut out = Vec::new();
+    let row = app
+        .worktree_row_of(&WorktreeId("w2".into()))
+        .expect("feat is a row");
+    select_worktree_row(&mut app, row, &mut out);
+    app.nav.focus = Focus::Worktrees;
+    out.clear();
+    press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+    assert!(
+        matches!(&app.modals.overlay, Some(Overlay::Confirm(c))
+            if c.action == PendingAction::DeleteWorktree(WorktreeId("w2".into()))),
+        "{:?}",
+        app.modals.overlay
+    );
+    crate::delete_check::sync(&mut app, &mut out);
+    let req_id = match out.as_slice() {
+        [ClientRequest::CheckWorktree { req_id, id }] if id.0 == "w2" => *req_id,
+        other => panic!("the confirm asks for one check: {other:?}"),
+    };
+    (app, req_id)
+}
+
+fn confirm_screen(app: &mut App) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+    terminal.draw(|f| ui::draw(f, app)).unwrap();
+    buffer_text(&terminal)
+}
+
+/// The DELETE CHECK: a confirm that would take a worktree off disk asks
+/// the DAEMON what it still holds, Enter waits for the answer, and the
+/// answer is listed under the question before anything is deleted — a
+/// band that reads "nothing running" can still have an agent building in
+/// it from another checkout.
+#[test]
+fn a_worktree_delete_waits_for_its_check_and_lists_what_it_found() {
+    with_default_config(|| {
+        let (mut app, req_id) = delete_feat_with_check();
+        let mut out = Vec::new();
+        crate::delete_check::sync(&mut app, &mut out);
+        assert!(out.is_empty(), "asked once per confirm: {out:?}");
+        // A check that has not answered within SHOW_AFTER: the dialog
+        // shows with "Checking…".
+        crate::delete_check::age_checks(&mut app, crate::delete_check::SHOW_AFTER);
+        assert!(confirm_screen(&mut app).contains("Checking 'feat' for work in progress"));
+
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(
+            out.is_empty(),
+            "nothing deleted ahead of the check: {out:?}"
+        );
+        assert!(matches!(app.modals.overlay, Some(Overlay::Confirm(_))));
+        assert_eq!(
+            app.chrome.flash.as_deref(),
+            Some("still checking 'feat' for work in progress — a moment")
+        );
+
+        hse(
+            &mut app,
+            ServerEvent::WorktreeChecked {
+                req_id,
+                id: WorktreeId("w2".into()),
+                check: nebula_core::WorktreeCheck {
+                    processes: vec![nebula_core::WorktreeProcess {
+                        pid: 4242,
+                        name: "cargo".into(),
+                    }],
+                    changes: 2,
+                    ahead: 1,
+                    base: Some("origin/main".into()),
+                    ..Default::default()
+                },
+            },
+        );
+        assert!(!app.requests.pending.contains_key(&req_id));
+        let screen = confirm_screen(&mut app);
+        for finding in [
+            "1 process is working in it: cargo (4242)",
+            "2 uncommitted changes",
+            "1 commit origin/main lacks (the branch keeps them)",
+        ] {
+            assert!(screen.contains(finding), "{finding:?} in:\n{screen}");
+        }
+
+        assert_eq!(app.chrome.flash, None, "the wait's footer line is down");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(
+            out.iter().any(|r| matches!(r,
+                ClientRequest::DeleteWorktree { id, .. } if id.0 == "w2")),
+            "confirmed with the findings in view: {out:?}"
+        );
+    });
+}
+
+/// A check that answers within SHOW_AFTER opens the dialog once, already
+/// filled in: until the answer nothing is drawn but a footer line, and
+/// once shown its text does not change — the first frame is the last
+/// word, not a "Checking…" body that grows into another dialog.
+#[test]
+fn a_fast_check_opens_the_dialog_once_and_filled_in() {
+    with_default_config(|| {
+        let (mut app, req_id) = delete_feat_with_check();
+        let held = confirm_screen(&mut app);
+        assert!(!held.contains("from disk?"), "no dialog yet:\n{held}");
+        assert!(
+            held.contains("checking 'feat' for work in progress"),
+            "{held}"
+        );
+
+        hse(
+            &mut app,
+            ServerEvent::WorktreeChecked {
+                req_id,
+                id: WorktreeId("w2".into()),
+                check: nebula_core::WorktreeCheck {
+                    changes: 2,
+                    ..Default::default()
+                },
+            },
+        );
+        let shown = confirm_screen(&mut app);
+        assert!(
+            shown.contains("from disk?") && shown.contains("2 uncommitted changes"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("checking 'feat'"),
+            "the footer line is down"
+        );
+        assert!(!shown.contains("Checking 'feat'"), "{shown}");
+        assert_eq!(app.chrome.flash, None);
+        assert_eq!(confirm_screen(&mut app), shown, "the same dialog");
+    });
+}
+
+/// A check that has not answered by SHOW_AFTER: the event loop wakes then,
+/// and the dialog shows with "Checking…" so the user sees why Enter waits.
+#[test]
+fn a_slow_check_reveals_the_dialog_at_show_after() {
+    with_default_config(|| {
+        let (mut app, _) = delete_feat_with_check();
+        let reveal = crate::delete_check::reveal_at(&app).expect("held");
+        let wait = reveal.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            wait > crate::delete_check::SHOW_AFTER - std::time::Duration::from_secs(1),
+            "{wait:?}"
+        );
+        crate::delete_check::age_checks(&mut app, crate::delete_check::SHOW_AFTER);
+        assert!(crate::delete_check::reveal_at(&app).is_none());
+        let screen = confirm_screen(&mut app);
+        assert!(
+            screen.contains("from disk?") && screen.contains("Checking 'feat'"),
+            "{screen}"
+        );
+    });
+}
+
+/// While the check is out the dialog chooses nothing: held unshown, only a
+/// cancel gets through (Enter waits, saying so); shown with "Checking…",
+/// Enter and `y` still wait for the answer. Esc cancels throughout, and
+/// takes the footer line down with it.
+#[test]
+fn a_confirm_waiting_on_its_check_chooses_nothing_but_cancel() {
+    with_default_config(|| {
+        let (mut app, _) = delete_feat_with_check();
+        let mut out = Vec::new();
+        for key in ['x', 'D', 'y'] {
+            press(&mut app, KeyCode::Char(key), KeyModifiers::NONE, &mut out);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(matches!(app.modals.overlay, Some(Overlay::Confirm(_))));
+
+        crate::delete_check::age_checks(&mut app, crate::delete_check::SHOW_AFTER);
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(matches!(app.modals.overlay, Some(Overlay::Confirm(_))));
+
+        let (mut app, _) = delete_feat_with_check();
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        assert!(app.modals.overlay.is_none(), "Esc cancels a held confirm");
+        crate::delete_check::sync(&mut app, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(app.chrome.flash, None, "and takes its footer line down");
+    });
+}
+
+/// A check the DAEMON could not run says so in the confirm — never read
+/// as a clean bill of health, never a footer error — and stops holding
+/// Enter.
+#[test]
+fn a_failed_worktree_check_says_so_and_lets_the_confirm_through() {
+    with_default_config(|| {
+        let (mut app, req_id) = delete_feat_with_check();
+        hse(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(req_id),
+                message: "worktree not found".into(),
+            },
+        );
+        assert_eq!(app.chrome.flash, None);
+        assert!(confirm_screen(&mut app).contains("Could not check 'feat': worktree not found"));
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(out
+            .iter()
+            .any(|r| matches!(r, ClientRequest::DeleteWorktree { .. })));
+    });
+}
+
+/// Closing the confirm forgets its check: a late answer is dropped, and
+/// reopening asks afresh rather than showing a stale reading.
+#[test]
+fn reopening_a_worktree_delete_checks_again() {
+    with_default_config(|| {
+        let (mut app, first) = delete_feat_with_check();
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        crate::delete_check::sync(&mut app, &mut out);
+        assert!(out.is_empty());
+        // Its error, landing after the confirm closed, is no footer flash.
+        hse(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(first),
+                message: "git failed".into(),
+            },
+        );
+        assert_eq!(app.chrome.flash, None);
+        hse(
+            &mut app,
+            ServerEvent::WorktreeChecked {
+                req_id: first,
+                id: WorktreeId("w2".into()),
+                check: Default::default(),
+            },
+        );
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+        crate::delete_check::sync(&mut app, &mut out);
+        match out.as_slice() {
+            [ClientRequest::CheckWorktree { req_id, .. }] => assert_ne!(*req_id, first),
+            other => panic!("asked again: {other:?}"),
+        }
+        crate::delete_check::age_checks(&mut app, crate::delete_check::SHOW_AFTER);
+        assert!(confirm_screen(&mut app).contains("Checking 'feat'"));
+    });
+}
+
+/// A DAEMON older than the check is never sent it, and its confirm works
+/// exactly as before.
+#[test]
+fn an_older_daemon_gets_no_check_and_the_old_confirm() {
+    with_default_config(|| {
+        let mut app = parity_tree();
+        app.requests.daemon_protocol = nebula_core::CHECK_WORKTREE_PROTOCOL - 1;
+        let mut out = Vec::new();
+        let row = app.worktree_row_of(&WorktreeId("w2".into())).unwrap();
+        select_worktree_row(&mut app, row, &mut out);
+        app.nav.focus = Focus::Worktrees;
+        out.clear();
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+        crate::delete_check::sync(&mut app, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(out
+            .iter()
+            .any(|r| matches!(r, ClientRequest::DeleteWorktree { .. })));
+    });
+}
+
+/// The card's own delete that offers to take the emptied worktree too is
+/// checked the same way; once shown, its "no, the card only" never waits,
+/// since it deletes no checkout — but nothing is chosen in a dialog still
+/// held unshown for its check.
+#[test]
+fn a_card_delete_that_offers_the_worktree_checks_it_but_n_never_waits() {
+    with_default_config(|| {
+        let mut app = App::new();
+        seed_emptiable_tree(&mut app);
+        upsert_agent(&mut app, "a2", "w2", "agent-2", false);
+        app.nav.focus = Focus::Sessions;
+        app.nav.sel_worktree = app
+            .visible_worktrees()
+            .iter()
+            .position(|w| w.id.0 == "w2")
+            .unwrap();
+        app.nav.sel_session = 0;
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+        crate::delete_check::sync(&mut app, &mut out);
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::CheckWorktree { id, .. }] if id.0 == "w2"),
+            "{out:?}"
+        );
+        out.clear();
+        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
+        assert!(out.is_empty(), "not chosen unseen: {out:?}");
+        assert!(matches!(app.modals.overlay, Some(Overlay::Confirm(_))));
+        crate::delete_check::age_checks(&mut app, crate::delete_check::SHOW_AFTER);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(out.is_empty(), "yes-to-both waits for the check: {out:?}");
+        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
+        assert!(
+            out.iter()
+                .any(|r| matches!(r, ClientRequest::DeleteAgent { .. }))
+                && !out
+                    .iter()
+                    .any(|r| matches!(r, ClientRequest::DeleteWorktree { .. })),
+            "{out:?}"
+        );
+    });
+}
+
+/// The main loop holds an attach asked for before the pane has a size —
+/// the tree landing ahead of the first frame — and sends it right after
+/// the frame, sized to the pane that frame drew: the session's PTY goes
+/// straight to that size instead of the fallback grid and back, a bounce
+/// an app reading its size off SIGWINCH never sees.
+#[test]
+fn an_attach_before_the_pane_has_a_size_waits_for_the_frame() {
+    let mut app = App::new();
+    app.pane.size_before_attach = true;
+    let sref = SessionRef::Agent(AgentId("a1".into()));
+    let mut out = Vec::new();
+    send_attach(&mut app, sref.clone(), &mut out);
+    assert!(out.is_empty(), "nothing goes out before the frame: {out:?}");
+    assert_eq!(app.pane.attach_after_draw, Some(sref.clone()));
+
+    // The frame draws the pane at 78×35.
+    app.pane.term_area = ratatui::layout::Rect::new(1, 2, 78, 35);
+    send_held_attach(&mut app, &mut out);
+    assert!(
+        matches!(
+            out.as_slice(),
+            [ClientRequest::Attach { session, cols: 78, rows: 35, .. }] if *session == sref
+        ),
+        "{out:?}"
+    );
+    assert_eq!(app.pane.attach_after_draw, None);
+}
+
+/// A frame that draws no pane (folded away) does not hold the attach
+/// forever: it goes out after that frame at the fallback grid, as it
+/// always did — a follow-up typed from the grid still reaches its CLI.
+#[test]
+fn a_held_attach_goes_out_after_a_frame_with_no_pane() {
+    let mut app = App::new();
+    app.pane.size_before_attach = true;
+    let sref = SessionRef::Agent(AgentId("a1".into()));
+    let mut out = Vec::new();
+    send_attach(&mut app, sref.clone(), &mut out);
+    send_held_attach(&mut app, &mut out);
+    let (cols, rows) = FALLBACK_PANE;
+    assert!(
+        matches!(
+            out.as_slice(),
+            [ClientRequest::Attach { session, cols: c, rows: r, .. }]
+                if *session == sref && *c == cols && *r == rows
+        ),
+        "{out:?}"
+    );
 }

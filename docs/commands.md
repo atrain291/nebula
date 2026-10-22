@@ -4,7 +4,7 @@
 
 The `nebula` CLI. Every command carries its own help — `nebula <command> --help` is the full page,
 flags and examples included, and `-h` is the one-screen reminder. `nebula --version` (short `-V`)
-prints the version of the binary you're running (`nebula 0.44.0`) — the same version the TUI's
+prints the version of the binary you're running (`nebula 0.45.0`) — the same version the TUI's
 FOOTER carries at its left edge (with `⇡ vX.Y.Z` beside it once a newer release is published), and
 what to check after `nebula upgrade`. This page is the same surface in one place. Commands marked *(agents run this)* are the ones a coding agent invokes on
 your behalf — see [How it works](how-it-works.md).
@@ -28,6 +28,7 @@ nebula config <cmd>         back up, restore or locate this machine's settings
 nebula browser              serve this TUI in a web browser via ttyd
 nebula ssh <host>           open nebula on a remote host over ssh
 nebula tunnel <host>        open a remote host's nebula in a tab here
+nebula sbx [name]           open nebula inside a local Docker sandbox
 nebula upgrade              install the latest published nebula
 ```
 
@@ -147,6 +148,15 @@ nebula tunnel <host> [dir] [--port N] [--remote-port N]
                           # `nebula browser`), --remote-port the far end when something there
                           # already holds that number. Settings ride along as they do for
                           # `nebula ssh` (--no-sync-config leaves them here)
+nebula sbx [name] [--image IMAGE]
+                          # nebula inside a local Docker container, so agents never see this
+                          # machine's files: creates `nebula-sbx` (or `nebula-sbx-<name>`) from
+                          # buildpack-deps:bookworm-scm on first use, starts it when stopped, and
+                          # gets in the way `nebula ssh` does — the same self-installing script,
+                          # over `docker exec` instead of ssh. The container is kept, daemon,
+                          # sessions and clones included; `docker rm -f nebula-sbx` discards it.
+                          # --image only applies when the container is created. Needs `docker`
+                          # on PATH; settings ride along as they do for `nebula ssh`
 nebula browser [--port N] [--bind ADDR | --public] [--credential USER:PASSWORD] [--no-open]
                           # serve this TUI in a browser tab via ttyd and open it; needs ttyd on
                           # PATH. With no --port it takes 7681 when that's free and a free port

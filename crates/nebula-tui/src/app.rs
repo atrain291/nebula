@@ -2042,6 +2042,18 @@ pub struct SettingsView {
     /// Transient line under the body: duplicate warnings, host-terminal
     /// warnings, "reset to default".
     pub notice: Option<(String, NoticeLevel)>,
+    /// SETTINGS SEARCH (`/`), while it is open: the query in place of the
+    /// rule under the tab strip. Once it has words the body is every tab's
+    /// matching rows ([`crate::config::search_rows`]), and `tab` /
+    /// `selected` follow the match under the cursor, so each key does to
+    /// a match what it does on the match's own tab.
+    pub search: Option<crate::text_input::TextInput>,
+    /// Keys go to the search field, not the rows: from `/` until Enter.
+    pub typing: bool,
+    /// The rows the query matched when it was last typed, held until it
+    /// changes: acting on a match (rebinding the chord it was found by)
+    /// never drops it from under the cursor.
+    pub results: Vec<(usize, crate::config::SettingsRow)>,
 }
 
 impl SettingsView {
@@ -2067,6 +2079,26 @@ impl SettingsView {
 
     pub fn is_hotkeys(&self) -> bool {
         self.tab == crate::config::hotkeys_tab()
+    }
+
+    /// The search has words, so the body shows its matches.
+    pub fn searching(&self) -> bool {
+        self.search
+            .as_ref()
+            .is_some_and(|q| q.split_whitespace().next().is_some())
+    }
+
+    /// The body's rows, each with the tab it is on: the search's matches
+    /// while it has words, the tab's own rows otherwise. Shared by the
+    /// renderer, the keys and the mouse so they can't drift.
+    pub fn body_rows(&self) -> Vec<(usize, crate::config::SettingsRow)> {
+        if self.searching() {
+            return self.results.clone();
+        }
+        crate::config::settings_rows(self.tab)
+            .into_iter()
+            .map(|row| (self.tab, row))
+            .collect()
     }
 
     pub fn warn(&mut self, text: impl Into<String>) {
@@ -2669,37 +2701,35 @@ pub fn last_interaction_ms(a: &Agent, now: i64) -> i64 {
 /// group in tree order. The SESSIONS panel and the LAUNCHER's grid both
 /// order on it, so a session sits in the same place in either.
 ///
-/// Working and blocked sessions all count as interacting *now*, so the raw
-/// stamp breaks that tie: among them the newest turn leads — which is what
+/// Working and blocked sessions count as interacting *now*, so they lead
+/// every other row, and among them the newest turn leads — which is what
 /// puts the session just launched at the top of the list, rather than under
 /// every session that has been mid-turn for an hour (a launch handed a
-/// first prompt is created `running`, stamped as it is created). Only live
-/// turns are ordered that way; for every other row the last key is the
-/// first one again, so nothing else moves.
-pub fn recency_key(
-    a: &Agent,
-    now: i64,
-) -> (
-    std::cmp::Reverse<i64>,
-    std::cmp::Reverse<bool>,
-    std::cmp::Reverse<i64>,
-) {
+/// first prompt is created `running`, stamped as it is created). Every
+/// other row follows on its stamp.
+///
+/// The key never reads the clock. "Now" is only ever compared with stamps,
+/// and a stamp is never newer than now — except when it is: a turn that
+/// ended in the very millisecond the event is handled, or a daemon whose
+/// clock runs a little ahead. Read through the clock, such a row ties or
+/// beats a working one until the clock moves on, and then the order flips
+/// back with no event to re-seat the cursors, which are row indices — the
+/// highlight jumped to another project while the pane stayed put. Ranking
+/// the live turns first by flag gives the same order without the flip.
+pub fn recency_key(a: &Agent) -> (std::cmp::Reverse<bool>, std::cmp::Reverse<i64>) {
     (
-        std::cmp::Reverse(last_interaction_ms(a, now)),
-        // A live turn holds the tie it shares with a row stamped in that
-        // same millisecond: its own stamp is older by design (the clock
-        // above stands in for it), so the stamps below cannot decide it.
         std::cmp::Reverse(is_active_status(a.status)),
         std::cmp::Reverse(a.status_changed_at),
     )
 }
 
-/// The two stamps a worktree or project row derives from the sessions
-/// under it. `interacted` is the newest [`last_interaction_ms`] — the sort
-/// key, where a working session counts as now — and `stamped` the newest
-/// raw `status_changed_at`, which the row's "23m ago" label reads so a
-/// checkout with an hour-long turn in it says "1h ago" exactly like the
-/// session does. Both 0 when nothing under the row has ever run.
+/// What a worktree or project row derives from the sessions under it.
+/// `interacted` is the newest [`last_interaction_ms`], where a working
+/// session counts as now; `stamped` the newest raw `status_changed_at`,
+/// which the row's "23m ago" label reads so a checkout with an hour-long
+/// turn in it says "1h ago" exactly like the session does; and `active`
+/// whether a turn is under way in any of them. Both stamps 0 when nothing
+/// under the row has ever run. Rows sort on [`Recency::sort_key`].
 ///
 /// Archived sessions count: the stamp records when work last happened
 /// there, and archiving a row is housekeeping, not activity.
@@ -2707,13 +2737,14 @@ pub fn recency_key(
 pub struct Recency {
     pub interacted: i64,
     pub stamped: i64,
+    pub active: bool,
 }
 
 impl Recency {
     fn of<'a>(agents: impl Iterator<Item = &'a Agent>, now: i64) -> Recency {
-        agents.fold(Recency::default(), |r, a| Recency {
-            interacted: r.interacted.max(last_interaction_ms(a, now)),
-            stamped: r.stamped.max(a.status_changed_at),
+        agents.fold(Recency::default(), |mut r, a| {
+            r.absorb(a, now);
+            r
         })
     }
 
@@ -2721,6 +2752,19 @@ impl Recency {
     fn absorb(&mut self, a: &Agent, now: i64) {
         self.interacted = self.interacted.max(last_interaction_ms(a, now));
         self.stamped = self.stamped.max(a.status_changed_at);
+        self.active |= is_active_status(a.status);
+    }
+
+    /// RECENCY ORDER for a worktree or project row, most recent first:
+    /// rows with a turn under way lead, newest stamp first among them,
+    /// then the rest on their newest stamp — the order [`recency_key`]
+    /// gives the sessions themselves, and like it, never read off the
+    /// clock, so it only moves when the tree does.
+    pub fn sort_key(&self) -> (std::cmp::Reverse<bool>, std::cmp::Reverse<i64>) {
+        (
+            std::cmp::Reverse(self.active),
+            std::cmp::Reverse(self.stamped),
+        )
     }
 }
 
@@ -3520,6 +3564,14 @@ pub struct PaneState {
     /// boot a CLI — walking the grid past four cards must not cold-spawn
     /// four agents and abandon three of them.
     pub pending_attach: Option<(SessionRef, std::time::Instant)>,
+    /// Set by the main loop, which draws: an attach asked for before the
+    /// pane has a size waits for the next frame (`attach_after_draw`)
+    /// instead of sizing the PTY to the fallback grid. Off in unit tests,
+    /// which attach at once.
+    pub size_before_attach: bool,
+    /// The attach held for the next frame: sent after it at the pane's
+    /// drawn size, or at the fallback grid when no pane was drawn.
+    pub attach_after_draw: Option<SessionRef>,
     /// What this connection is attached to daemon-side. Lags `term.sref`
     /// while an attach waits out its debounce, so the Detach that precedes
     /// the next Attach names the session the daemon actually holds.
@@ -4048,6 +4100,11 @@ pub struct RequestState {
     /// (`event_loop::optimistic`): an upsert of one of them is a straggler
     /// from before the delete, and is ignored rather than shown.
     pub deleting: std::collections::HashSet<nebula_core::EntityId>,
+    /// The protocol the connected DAEMON speaks: requests newer than it
+    /// are not sent. This build's own until the connection says otherwise.
+    pub daemon_protocol: u32,
+    /// The DELETE CHECKS behind the open confirm (`delete_check`).
+    pub delete_checks: crate::delete_check::DeleteChecks,
 }
 
 impl Default for RequestState {
@@ -4064,6 +4121,8 @@ impl Default for RequestState {
             pending_prewarm: None,
             next_keepwarm: None,
             deleting: std::collections::HashSet::new(),
+            daemon_protocol: nebula_core::PROTOCOL_VERSION,
+            delete_checks: Default::default(),
         }
     }
 }
@@ -5074,17 +5133,14 @@ impl App {
         // sort makes (`project_recencies`).
         let recencies = project_recencies(&self.tree, now);
         rows.sort_by_key(|i| {
-            // The raw stamp breaks the tie every project with a session
-            // mid-turn shares, so the project just launched into leads —
-            // the sessions list's own rule (`recency_key`).
-            let r = recencies
+            // Among projects with a turn under way, the project just
+            // launched into leads — the sessions list's own rule
+            // (`recency_key`).
+            recencies
                 .get(&self.tree.projects[*i].id)
                 .copied()
-                .unwrap_or_default();
-            (
-                std::cmp::Reverse(r.interacted),
-                std::cmp::Reverse(r.stamped),
-            )
+                .unwrap_or_default()
+                .sort_key()
         });
         rows
     }
@@ -5423,14 +5479,8 @@ impl App {
         let recencies = worktree_recencies(&self.tree, now);
         rows.sort_by_key(|&i| {
             let w = &worktrees[i];
-            // The raw stamp breaks the tie every checkout with a session
-            // mid-turn shares — see `recency_key`.
             let r = recencies.get(&w.id).copied().unwrap_or_default();
-            (
-                std::cmp::Reverse(w.is_main),
-                std::cmp::Reverse(r.interacted),
-                std::cmp::Reverse(r.stamped),
-            )
+            (std::cmp::Reverse(w.is_main), r.sort_key())
         });
         rows
     }
@@ -5721,7 +5771,6 @@ impl App {
     /// builder does not pay for `selected_worktree` to find it again
     /// ([`App::visible_session_rows`]).
     fn sessions_in(&self, wt: &WorktreeId) -> Vec<Agent> {
-        let now = now_ms();
         // Stable throughout, so ties — never-run rows especially, which all
         // stamp 0 — keep tree order instead of shuffling between frames.
         let mut rows: Vec<Agent> = self
@@ -5731,7 +5780,7 @@ impl App {
             .filter(|a| &a.worktree_id == wt && !a.archived)
             .cloned()
             .collect();
-        rows.sort_by_key(|a| recency_key(a, now));
+        rows.sort_by_key(recency_key);
         // A stable pass over the top of it: the session just launched
         // leads the list from the moment its row arrives, rather than
         // sitting under the working ones until its own turn starts.

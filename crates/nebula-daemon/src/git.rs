@@ -81,9 +81,22 @@ pub struct WorktreeEntry {
 
 /// Parse `git worktree list --porcelain`. The first entry is the main
 /// checkout.
+///
+/// Only checkouts that are really there are returned. The parse drops the
+/// ones git marks `prunable`; a *locked* checkout is never marked prunable
+/// however gone it is (Claude Code locks its worktrees and a killed session
+/// never unlocks), so a linked checkout whose `.git` file is missing is
+/// dropped here too. Git's registry is left exactly as it was: nebula never
+/// prunes or unlocks for the user, and the checkout is listed again the
+/// moment its directory comes back (a remounted volume, say).
 pub async fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
     let mut entries = parse_worktree_list(&out);
+    let mut index = 0;
+    entries.retain(|entry| {
+        index += 1;
+        index == 1 || entry.path.join(".git").exists()
+    });
     for entry in &mut entries {
         if entry.branch != "(detached)" && !entry.branch.starts_with("detached @ ") {
             continue;
@@ -99,6 +112,12 @@ pub async fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
 /// against captured porcelain output: one stanza per checkout, `worktree
 /// <path>` first, then `HEAD <sha>` and either `branch refs/heads/<name>`
 /// or `detached`, separated by blank lines.
+///
+/// A stanza marked `prunable` is left out: its directory was deleted without
+/// `git worktree remove` (`rm -rf`, Finder, a disk sweep), and git keeps
+/// listing it only until the next `git worktree prune`. It is not a checkout
+/// anyone can work in, so it must not be adopted or keep a row alive. The
+/// main checkout is never prunable, so it stays first.
 fn parse_worktree_list(out: &str) -> Vec<WorktreeEntry> {
     /// Close out the stanza in progress, if one is open: a `branch` line
     /// named it, otherwise it is a detached HEAD. The next `worktree` line
@@ -108,11 +127,16 @@ fn parse_worktree_list(out: &str) -> Vec<WorktreeEntry> {
         path: Option<PathBuf>,
         branch: &mut Option<String>,
         head: Option<&str>,
+        prunable: bool,
     ) {
+        let branch_name = branch.take();
+        if prunable {
+            return;
+        }
         if let Some(path) = path {
             entries.push(WorktreeEntry {
                 path,
-                branch: branch.take().unwrap_or_else(|| detached_label(head)),
+                branch: branch_name.unwrap_or_else(|| detached_label(head)),
             });
         }
     }
@@ -121,18 +145,28 @@ fn parse_worktree_list(out: &str) -> Vec<WorktreeEntry> {
     let mut path: Option<PathBuf> = None;
     let mut branch: Option<String> = None;
     let mut head: Option<String> = None;
+    let mut prunable = false;
     for line in out.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
-            close(&mut entries, path.take(), &mut branch, head.as_deref());
+            close(
+                &mut entries,
+                path.take(),
+                &mut branch,
+                head.as_deref(),
+                prunable,
+            );
             head = None;
+            prunable = false;
             path = Some(PathBuf::from(p));
         } else if let Some(sha) = line.strip_prefix("HEAD ") {
             head = Some(sha.to_string());
         } else if let Some(b) = line.strip_prefix("branch ") {
             branch = Some(b.trim_start_matches("refs/heads/").to_string());
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            prunable = true;
         }
     }
-    close(&mut entries, path, &mut branch, head.as_deref());
+    close(&mut entries, path, &mut branch, head.as_deref(), prunable);
     entries
 }
 
@@ -573,6 +607,107 @@ pub async fn status_porcelain(repo: &Path) -> Result<String> {
     .await
 }
 
+/// The paths `git status` reports in a checkout — uncommitted edits,
+/// untracked files, and submodules with changes or new commits of their
+/// own — relative to it. NUL-separated porcelain, so a name with a space
+/// or a newline survives; a rename reports its new name only.
+pub async fn changed_paths(worktree: &Path) -> Result<Vec<PathBuf>> {
+    let out = git(
+        worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+    )
+    .await?;
+    Ok(parse_status_z(&out))
+}
+
+/// Pure core of [`changed_paths`].
+fn parse_status_z(out: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut entries = out.split('\0').filter(|e| !e.is_empty());
+    while let Some(entry) = entries.next() {
+        let Some((xy, path)) = entry.split_at_checked(3) else {
+            continue;
+        };
+        paths.push(PathBuf::from(path));
+        // A rename or copy is followed by the name it came from.
+        if xy.starts_with(['R', 'C']) {
+            entries.next();
+        }
+    }
+    paths
+}
+
+/// What a checkout's commits are measured against when the DELETE CHECK
+/// asks what it holds that its base lacks: the WORKTREE BASE BRANCH
+/// setting when the repo has it (origin's copy first, as a cut takes it),
+/// else origin's default branch, else the ROOT WORKTREE's branch. Local
+/// refs only — nothing is fetched to answer a confirm.
+pub async fn comparison_base(repo: &Path, configured: Option<&str>) -> Option<String> {
+    if let Some(name) = configured {
+        if let Some(remote) = origin_branch(repo, name).await {
+            return Some(remote);
+        }
+        if local_branch(repo, name).await {
+            return Some(name.to_string());
+        }
+    }
+    if let Ok(out) = git(
+        repo,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    {
+        let short = out.trim();
+        if !short.is_empty() {
+            return Some(short.to_string());
+        }
+    }
+    git(repo, &["symbolic-ref", "-q", "--short", "HEAD"])
+        .await
+        .ok()
+        .map(|out| out.trim().to_string())
+        .filter(|branch| !branch.is_empty())
+}
+
+/// How many commits the checkout's HEAD has that `base` lacks.
+pub async fn commits_ahead(worktree: &Path, base: &str) -> Result<u32> {
+    let range = format!("{base}..HEAD");
+    count(git(worktree, &["rev-list", "--count", &range]).await?)
+}
+
+/// Is the checkout's HEAD detached — on no branch at all?
+pub async fn head_detached(worktree: &Path) -> bool {
+    git(worktree, &["symbolic-ref", "-q", "HEAD"])
+        .await
+        .is_err()
+}
+
+/// How many of HEAD's commits no branch and no remote-tracking ref holds:
+/// on a detached HEAD, what only the reflog would keep once the checkout
+/// is gone.
+pub async fn unreferenced_commits(worktree: &Path) -> Result<u32> {
+    count(
+        git(
+            worktree,
+            &[
+                "rev-list",
+                "--count",
+                "HEAD",
+                "--not",
+                "--branches",
+                "--remotes",
+            ],
+        )
+        .await?,
+    )
+}
+
+fn count(out: String) -> Result<u32> {
+    out.trim()
+        .parse()
+        .map_err(|_| anyhow!("git printed no count: {}", out.trim()))
+}
+
 pub async fn remove_worktree(repo: &Path, worktree_path: &Path, force: bool) -> Result<()> {
     // Checkout already gone (manual rm -rf): `git worktree remove` would fail,
     // but the user's intent is already satisfied — just drop git's stale
@@ -662,6 +797,43 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].branch, "b");
         assert!(parse_worktree_list("").is_empty());
+    }
+
+    #[test]
+    fn parse_worktree_list_leaves_out_checkouts_deleted_without_git() {
+        // The `gone` stanza is git's porcelain after `rm -rf` on a linked
+        // worktree (git 2.31+ prints `prunable`, with a reason). The
+        // `bare-mark` one is hand-written: it guards against a git that
+        // prints the mark with no reason.
+        let porcelain = "worktree /repo\n\
+                         HEAD 0123456789abcdef0123456789abcdef01234567\n\
+                         branch refs/heads/main\n\
+                         \n\
+                         worktree /repo-worktrees/gone\n\
+                         HEAD 0123456789abcdef0123456789abcdef01234567\n\
+                         branch refs/heads/gone\n\
+                         prunable gitdir file points to non-existent location\n\
+                         \n\
+                         worktree /repo-worktrees/bare-mark\n\
+                         HEAD 0123456789abcdef0123456789abcdef01234567\n\
+                         detached\n\
+                         prunable\n\
+                         \n\
+                         worktree /repo-worktrees/kept\n\
+                         HEAD fedcba9876543210fedcba9876543210fedcba98\n\
+                         branch refs/heads/kept\n";
+        let entries = parse_worktree_list(porcelain);
+        let got: Vec<(&Path, &str)> = entries
+            .iter()
+            .map(|e| (e.path.as_path(), e.branch.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (Path::new("/repo"), "main"),
+                (Path::new("/repo-worktrees/kept"), "kept"),
+            ]
+        );
     }
 
     #[test]
@@ -1227,9 +1399,41 @@ mod tests {
         std::fs::remove_dir_all(&wt).unwrap();
 
         remove_worktree(&repo, &wt, false).await.unwrap();
-        // The stale registration should be pruned from git's list too.
+        // The stale registration should be pruned from git's registry too.
+        // `list_worktrees` hides a gone checkout whether or not it was
+        // pruned, so ask git's raw listing instead.
+        let raw = git(&repo, &["worktree", "list", "--porcelain"])
+            .await
+            .unwrap();
+        assert!(!raw.contains("prunable"), "{raw}");
+        assert_eq!(raw.matches("worktree ").count(), 1, "{raw}");
+    }
+
+    /// A locked checkout is never marked `prunable`, however gone it is, so
+    /// the parse alone would keep it. It is still not a checkout anyone can
+    /// work in, and the lock is git's business: it is left in place.
+    #[tokio::test]
+    async fn list_worktrees_leaves_out_a_locked_checkout_that_was_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo).await;
+        let wt = add_worktree(&repo, "feature", None).await.unwrap();
+        git(&repo, &["worktree", "lock", &wt.to_string_lossy()])
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        let raw = git(&repo, &["worktree", "list", "--porcelain"])
+            .await
+            .unwrap();
+        assert!(raw.contains("locked") && !raw.contains("prunable"), "{raw}");
         let entries = list_worktrees(&repo).await.unwrap();
-        assert!(entries.iter().all(|e| e.path != wt));
+        assert_eq!(entries.len(), 1, "only the main checkout: {entries:?}");
+        assert!(git(&repo, &["worktree", "list", "--porcelain"])
+            .await
+            .unwrap()
+            .contains("locked"));
     }
 
     #[tokio::test]
@@ -1283,5 +1487,68 @@ mod tests {
 
         assert!(remove_worktree(&repo, &wt, false).await.is_err());
         remove_worktree(&repo, &wt, true).await.unwrap();
+    }
+
+    #[test]
+    fn status_z_keeps_odd_names_and_drops_rename_sources() {
+        let out = " M src/a b.rs\0R  new.rs\0old.rs\0?? notes/\0 M sub\0";
+        assert_eq!(
+            parse_status_z(out),
+            ["src/a b.rs", "new.rs", "notes/", "sub"].map(PathBuf::from)
+        );
+        assert!(parse_status_z("").is_empty());
+    }
+
+    /// The DELETE CHECK's git half on a real checkout: edits and untracked
+    /// files are counted, commits are measured against the base, and a
+    /// detached HEAD's commits are the ones nothing else holds.
+    #[tokio::test]
+    async fn delete_check_git_reads_changes_commits_and_detached_heads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo).await;
+        let wt = add_worktree(&repo, "feature", None).await.unwrap();
+
+        assert!(changed_paths(&wt).await.unwrap().is_empty());
+        let base = comparison_base(&repo, None).await;
+        assert_eq!(
+            base.as_deref(),
+            Some("main"),
+            "no origin: the root's branch"
+        );
+        assert_eq!(commits_ahead(&wt, "main").await.unwrap(), 0);
+
+        std::fs::write(wt.join("new.txt"), "x").unwrap();
+        assert_eq!(
+            changed_paths(&wt).await.unwrap(),
+            [PathBuf::from("new.txt")]
+        );
+        git(&wt, &["add", "."]).await.unwrap();
+        git(&wt, &["commit", "-m", "work"]).await.unwrap();
+        assert_eq!(commits_ahead(&wt, "main").await.unwrap(), 1);
+        assert!(!head_detached(&wt).await);
+        assert_eq!(
+            unreferenced_commits(&wt).await.unwrap(),
+            0,
+            "the branch holds it"
+        );
+
+        git(&wt, &["checkout", "--detach"]).await.unwrap();
+        git(&wt, &["commit", "--allow-empty", "-m", "loose"])
+            .await
+            .unwrap();
+        assert!(head_detached(&wt).await);
+        assert_eq!(unreferenced_commits(&wt).await.unwrap(), 1);
+
+        assert_eq!(
+            comparison_base(&repo, Some("feature")).await.as_deref(),
+            Some("feature"),
+            "a configured base the repo has wins"
+        );
+        assert_eq!(
+            comparison_base(&repo, Some("nope")).await.as_deref(),
+            Some("main")
+        );
     }
 }
