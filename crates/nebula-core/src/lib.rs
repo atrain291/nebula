@@ -6,6 +6,8 @@ pub mod env;
 pub mod harness;
 pub mod host;
 pub mod ids;
+pub mod inbox;
+pub use inbox::*;
 pub mod mem;
 pub mod paths;
 pub mod project_file;

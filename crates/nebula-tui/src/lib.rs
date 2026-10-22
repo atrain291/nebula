@@ -21,6 +21,7 @@ pub mod git_log;
 pub mod graphics;
 pub mod grep_search;
 pub mod hosts;
+pub mod inbox;
 pub mod ipc;
 pub mod issues;
 pub mod key_combo;

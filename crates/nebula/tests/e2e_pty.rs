@@ -5498,3 +5498,605 @@ exit 0
     wait_for_exit(&mut daemon);
     assert_eq!(runs(), "1");
 }
+
+// Manual inbox milestone: real socket, SQLite, daemon restarts and stub PTYs.
+async fn inbox_rpc(c: &mut UnixStream, req: ClientRequest, id: u64) -> ServerEvent {
+    write_frame(c, &req).await.unwrap();
+    let events = read_events_until(c, EVENT_TIMEOUT, |evs| find_ack(evs, id).is_some()).await;
+    find_ack(&events, id).unwrap().clone()
+}
+async fn inbox_rows(c: &mut UnixStream, req_id: u64) -> Vec<nebula_core::InboxItem> {
+    write_frame(c, &ClientRequest::ListInbox { req_id })
+        .await
+        .unwrap();
+    let events = read_events_until(c, EVENT_TIMEOUT, |evs| evs.iter().any(|e| matches!(e, ServerEvent::InboxItems { req_id: r, complete: true, .. } if *r == req_id))).await;
+    events
+        .into_iter()
+        .filter_map(|e| match e {
+            ServerEvent::InboxItems {
+                req_id: r, items, ..
+            } if r == req_id => Some(items),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+fn inbox_draft(worktree: nebula_core::WorktreeId) -> nebula_core::InboxDraft {
+    nebula_core::InboxDraft {
+        review_revision: 0,
+        instructions: "Approved change only".into(),
+        worktree,
+        kind: AgentKind::Claude,
+        custom_harness: None,
+        model: None,
+        effort: None,
+    }
+}
+fn inbox_launched(event: ServerEvent) -> nebula_core::AgentId {
+    match event {
+        ServerEvent::Ack {
+            created: Some(EntityId::Agent(id)),
+            ..
+        } => id,
+        other => panic!("launch failed: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn inbox_persists_review_without_launch_and_retries_share_one_session() {
+    use nebula_core::InboxId;
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let mut daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let wt = add_project_get_main_worktree(&mut c, &repo).await;
+    let id = InboxId::generate();
+    assert!(matches!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::CaptureInbox {
+                req_id: 201,
+                id: id.clone(),
+                original: "Original title\n\nOriginal body".into(),
+                source_url: Some("https://github.com/o/r/issues/1".into())
+            },
+            201
+        )
+        .await,
+        ServerEvent::Ack { .. }
+    ));
+    let draft = inbox_draft(wt.id.clone());
+    assert!(matches!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::SaveInbox {
+                req_id: 202,
+                id: id.clone(),
+                draft: draft.clone()
+            },
+            202
+        )
+        .await,
+        ServerEvent::Ack { .. }
+    ));
+    let rows = inbox_rows(&mut c, 203).await;
+    assert_eq!(rows[0].draft.as_ref(), Some(&draft));
+    assert!(rows[0].session.is_none());
+    write_frame(&mut c, &ClientRequest::Subscribe)
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::Snapshot { .. }))
+    })
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::Snapshot { agents, .. } if agents.is_empty())),
+        "capture and review cannot launch"
+    );
+    drop(c);
+    drop(daemon);
+    daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    assert_eq!(
+        inbox_rows(&mut c, 204).await[0],
+        rows[0],
+        "restart keeps source and review byte for byte"
+    );
+    // Two clients race the same explicit launch. Both must get the same session.
+    let mut c2 = connect(&env.sock()).await;
+    handshake(&mut c2).await;
+    let first = inbox_rpc(
+        &mut c,
+        ClientRequest::LaunchInbox {
+            req_id: 205,
+            id: id.clone(),
+            draft: draft.clone(),
+        },
+        205,
+    );
+    let second = inbox_rpc(
+        &mut c2,
+        ClientRequest::LaunchInbox {
+            req_id: 206,
+            id: id.clone(),
+            draft: draft.clone(),
+        },
+        206,
+    );
+    let (first, second) = tokio::join!(first, second);
+    let session = inbox_launched(first);
+    assert_eq!(inbox_launched(second), session);
+    assert_eq!(session.0, id.0, "the item's launch identity is stable");
+    let item = inbox_rows(&mut c, 207).await.remove(0);
+    assert_eq!(item.session, Some(session.clone()));
+    assert!(!item.archived);
+    assert_eq!(item.original, "Original title\n\nOriginal body");
+    assert_eq!(item.draft, Some(draft.clone()));
+    // Revisit the linked session through ordinary Attach; no inbox-specific runner.
+    let sref = SessionRef::Agent(session.clone());
+    write_frame(
+        &mut c,
+        &ClientRequest::Attach {
+            session: sref.clone(),
+            from_seq: None,
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await
+    .unwrap();
+    write_frame(
+        &mut c,
+        &ClientRequest::Input {
+            session: sref,
+            data: b"inbox_session_revisited\n".to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        String::from_utf8_lossy(&collected_output(evs)).contains("inbox_session_revisited")
+    })
+    .await;
+    // Archive/dismiss belongs to the task, independently of the agent lifecycle.
+    assert!(matches!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::ArchiveInbox {
+                req_id: 208,
+                id: id.clone(),
+                archived: true
+            },
+            208
+        )
+        .await,
+        ServerEvent::Ack { .. }
+    ));
+    assert!(inbox_rows(&mut c, 209).await[0].archived);
+    drop(c);
+    drop(c2);
+    drop(daemon);
+    let _daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    assert_eq!(
+        inbox_launched(
+            inbox_rpc(
+                &mut c,
+                ClientRequest::LaunchInbox {
+                    req_id: 210,
+                    id: id.clone(),
+                    draft
+                },
+                210
+            )
+            .await
+        ),
+        session
+    );
+    write_frame(&mut c, &ClientRequest::Subscribe)
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::Snapshot { .. }))
+    })
+    .await;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ServerEvent::Snapshot { agents, .. } if agents.len() == 1)));
+    // Inbox details remain request-only, even for compatible subscribers.
+    let mut old = connect(&env.sock()).await;
+    write_frame(
+        &mut old,
+        &ClientRequest::Hello {
+            protocol_version: nebula_core::MIN_COMPATIBLE_PROTOCOL,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        read_frame::<ServerEvent, _>(&mut old).await.unwrap(),
+        Some(ServerEvent::HelloOk { .. })
+    ));
+    write_frame(&mut old, &ClientRequest::Subscribe)
+        .await
+        .unwrap();
+    read_events_until(&mut old, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::Snapshot { .. }))
+    })
+    .await;
+    inbox_rows(&mut c, 211).await;
+    assert!(!read_events_for(&mut old, Duration::from_millis(100))
+        .await
+        .iter()
+        .any(|e| matches!(e, ServerEvent::InboxItems { .. })));
+}
+
+#[tokio::test]
+async fn inbox_failed_spawn_keeps_approved_draft_and_can_retry_after_restart() {
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let daemon = env.spawn_daemon_with_agent_cmd("/nebula-inbox-missing-test-command");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let wt = add_project_get_main_worktree(&mut c, &repo).await;
+    let id = nebula_core::InboxId::generate();
+    inbox_rpc(
+        &mut c,
+        ClientRequest::CaptureInbox {
+            req_id: 220,
+            id: id.clone(),
+            original: "Original source".into(),
+            source_url: None,
+        },
+        220,
+    )
+    .await;
+    let draft = inbox_draft(wt.id);
+    assert!(matches!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::LaunchInbox {
+                req_id: 221,
+                id: id.clone(),
+                draft: draft.clone()
+            },
+            221
+        )
+        .await,
+        ServerEvent::Error { .. }
+    ));
+    let item = inbox_rows(&mut c, 222).await.remove(0);
+    assert_eq!(item.original, "Original source");
+    assert_eq!(item.draft.as_ref(), Some(&draft));
+    assert!(item.session.is_none());
+    drop(c);
+    drop(daemon);
+    let _daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    assert_eq!(inbox_rows(&mut c, 223).await.remove(0), item);
+    let session = inbox_launched(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::LaunchInbox {
+                req_id: 224,
+                id: id.clone(),
+                draft,
+            },
+            224,
+        )
+        .await,
+    );
+    assert_eq!(session.0, id.0);
+}
+
+#[tokio::test]
+async fn inbox_lists_tasks_larger_than_one_ipc_frame() {
+    let env = TestEnv::new();
+    let _daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let source = "x".repeat(nebula_core::MAX_INBOX_SOURCE_BYTES);
+    for req_id in 1..=65 {
+        assert!(matches!(
+            inbox_rpc(
+                &mut c,
+                ClientRequest::CaptureInbox {
+                    req_id,
+                    id: nebula_core::InboxId::generate(),
+                    original: source.clone(),
+                    source_url: None
+                },
+                req_id
+            )
+            .await,
+            ServerEvent::Ack { .. }
+        ));
+    }
+    let rows = inbox_rows(&mut c, 100).await;
+    assert_eq!(rows.len(), 65);
+    assert!(rows
+        .iter()
+        .all(|r| r.original == source && r.session.is_none()));
+}
+
+#[tokio::test]
+async fn inbox_outcomes_restart_stale_launch_duplicate_save_and_user_decision() {
+    use nebula_core::{InboxId, InboxOutcome, InboxReview};
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let mut daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let wt = add_project_get_main_worktree(&mut c, &repo).await;
+    let id = InboxId::generate();
+    let forbidden = env.tmp.path().join("verification-must-not-run");
+    let source = format!("Imported text: touch {}", forbidden.display());
+    assert!(matches!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::CaptureInbox {
+                req_id: 301,
+                id: id.clone(),
+                original: source.clone(),
+                source_url: None,
+            },
+            301
+        )
+        .await,
+        ServerEvent::Ack { .. }
+    ));
+    let initial = inbox_rows(&mut c, 302).await.remove(0);
+    assert_eq!(initial.review, InboxReview::default());
+    let review = InboxReview {
+        done_when: "The user reviews the result".into(),
+        constraints: "Preserve unrelated work".into(),
+        verification_plan: format!(
+            "touch {} (descriptive only; never auto-run)",
+            forbidden.display()
+        ),
+        outcome: InboxOutcome::NeedsReview,
+        note: "Pending inspection".into(),
+    };
+    let event_id = InboxId::generate().0;
+    for req_id in [303, 304] {
+        assert!(matches!(
+            inbox_rpc(
+                &mut c,
+                ClientRequest::SaveInboxReview {
+                    req_id,
+                    id: id.clone(),
+                    event_id: event_id.clone(),
+                    expected_revision: 0,
+                    review: review.clone(),
+                },
+                req_id
+            )
+            .await,
+            ServerEvent::Ack { .. }
+        ));
+    }
+    let saved = inbox_rows(&mut c, 305).await.remove(0);
+    assert_eq!(saved.review_history.len(), 1);
+    assert_eq!(saved.review, review);
+    assert!(saved.session.is_none());
+    // A prompt opened on old criteria must refuse, preserving the task.
+    let mut draft = inbox_draft(wt.id);
+    assert!(matches!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::LaunchInbox {
+                req_id: 306,
+                id: id.clone(),
+                draft: draft.clone(),
+            },
+            306
+        )
+        .await,
+        ServerEvent::Error { .. }
+    ));
+    assert!(inbox_rows(&mut c, 307).await[0].session.is_none());
+    drop(c);
+    drop(daemon);
+    daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    assert_eq!(inbox_rows(&mut c, 308).await.remove(0), saved);
+    draft.review_revision = 1;
+    draft.model = Some("known-requested-model".into());
+    draft.effort = Some("high".into());
+    let session = inbox_launched(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::LaunchInbox {
+                req_id: 309,
+                id: id.clone(),
+                draft: draft.clone(),
+            },
+            309,
+        )
+        .await,
+    );
+    let launched = inbox_rows(&mut c, 310).await.remove(0);
+    let launch = launched.launch.as_ref().unwrap();
+    assert_eq!(
+        launch.prompt,
+        nebula_core::inbox_launch_prompt(&draft.instructions, &review)
+    );
+    assert!(!launch.prompt.contains("Imported text"));
+    assert_eq!(
+        launch.prompt.matches("Done when (user reviewed)").count(),
+        1
+    );
+    assert_eq!(launch.review, review);
+    assert_eq!(launch.model, draft.model);
+    assert_eq!(launch.effort, draft.effort);
+    assert_eq!(launched.review.outcome, InboxOutcome::NeedsReview);
+    assert!(
+        !forbidden.exists(),
+        "verification text must not execute as a shell command"
+    );
+    // Explicit human disposition is independent from archive and live PTY.
+    let accepted = InboxReview {
+        outcome: InboxOutcome::Accepted,
+        note: "User inspected results".into(),
+        ..review
+    };
+    assert!(matches!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::SaveInboxReview {
+                req_id: 311,
+                id: id.clone(),
+                event_id: InboxId::generate().0,
+                expected_revision: 1,
+                review: accepted.clone(),
+            },
+            311
+        )
+        .await,
+        ServerEvent::Ack { .. }
+    ));
+    assert!(matches!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::ArchiveInbox {
+                req_id: 312,
+                id: id.clone(),
+                archived: true
+            },
+            312
+        )
+        .await,
+        ServerEvent::Ack { .. }
+    ));
+    drop(c);
+    drop(daemon);
+    let _daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let persisted = inbox_rows(&mut c, 313).await.remove(0);
+    assert_eq!(persisted.review, accepted);
+    assert_eq!(persisted.review_history.len(), 2);
+    assert_eq!(persisted.launch, launched.launch);
+    assert_eq!(persisted.session, Some(session));
+    assert!(persisted.archived);
+    assert_eq!(persisted.original, source);
+    assert!(!forbidden.exists());
+    // Incompatible older peers are refused during the stable handshake.
+    let mut old = connect(&env.sock()).await;
+    write_frame(
+        &mut old,
+        &ClientRequest::Hello {
+            protocol_version: 53,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        read_frame::<ServerEvent, _>(&mut old).await.unwrap(),
+        Some(ServerEvent::Incompatible { .. })
+    ));
+}
+
+#[tokio::test]
+async fn inbox_outcome_concurrent_review_saves_keep_one_winner_and_one_audit_event() {
+    use nebula_core::{InboxId, InboxReview};
+    let env = TestEnv::new();
+    let _daemon = env.spawn_daemon_with_agent_cmd("/bin/cat");
+    let mut c = connect(&env.sock()).await;
+    let mut c2 = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    handshake(&mut c2).await;
+    let id = InboxId::generate();
+    inbox_rpc(
+        &mut c,
+        ClientRequest::CaptureInbox {
+            req_id: 321,
+            id: id.clone(),
+            original: "Original".into(),
+            source_url: None,
+        },
+        321,
+    )
+    .await;
+    let first_review = InboxReview {
+        note: "First reviewer".into(),
+        ..Default::default()
+    };
+    let second_review = InboxReview {
+        note: "Second reviewer".into(),
+        ..Default::default()
+    };
+    let first_event = InboxId::generate().0;
+    let second_event = InboxId::generate().0;
+    let (first, second) = tokio::join!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::SaveInboxReview {
+                req_id: 322,
+                id: id.clone(),
+                event_id: first_event.clone(),
+                expected_revision: 0,
+                review: first_review.clone()
+            },
+            322
+        ),
+        inbox_rpc(
+            &mut c2,
+            ClientRequest::SaveInboxReview {
+                req_id: 323,
+                id: id.clone(),
+                event_id: second_event.clone(),
+                expected_revision: 0,
+                review: second_review.clone()
+            },
+            323
+        )
+    );
+    let (event_id, review) = match (first, second) {
+        (ServerEvent::Ack { .. }, ServerEvent::Error { .. }) => (first_event, first_review),
+        (ServerEvent::Error { .. }, ServerEvent::Ack { .. }) => (second_event, second_review),
+        other => panic!("exactly one concurrent revision must win: {other:?}"),
+    };
+    let (retry1, retry2) = tokio::join!(
+        inbox_rpc(
+            &mut c,
+            ClientRequest::SaveInboxReview {
+                req_id: 324,
+                id: id.clone(),
+                event_id: event_id.clone(),
+                expected_revision: 0,
+                review: review.clone()
+            },
+            324
+        ),
+        inbox_rpc(
+            &mut c2,
+            ClientRequest::SaveInboxReview {
+                req_id: 325,
+                id: id.clone(),
+                event_id,
+                expected_revision: 0,
+                review: review.clone()
+            },
+            325
+        )
+    );
+    assert!(matches!(retry1, ServerEvent::Ack { .. }));
+    assert!(matches!(retry2, ServerEvent::Ack { .. }));
+    let item = inbox_rows(&mut c, 326).await.remove(0);
+    assert_eq!(item.review, review);
+    assert_eq!(item.review_revision, 1);
+    assert_eq!(item.review_history.len(), 1);
+    assert!(item.session.is_none());
+    assert!(!item.archived);
+}

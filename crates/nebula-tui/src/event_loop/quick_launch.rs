@@ -38,6 +38,11 @@ pub(super) fn submit(
     // — or a MODEL / EFFORT — picked through `Tab` makes that the next
     // launch's default. A preset's harness is the preset's own, not a
     // change of default, so a preset launch leaves the rows alone.
+    if launch.inbox.is_some() && !matches!(launch.target, QuickTarget::Worktree(_)) {
+        app.chrome.flash = Some("inbox: choose an existing worktree (^T)".into());
+        crate::quick_prompt::reopen(app, launch, &text);
+        return;
+    }
     if launch.preset.is_none() {
         remember_launch(
             app,
@@ -248,6 +253,8 @@ pub(super) fn draft(
         launch.effort.clone(),
     );
     AgentLaunchDraft {
+        inbox: launch.inbox.clone(),
+        inbox_review_revision: launch.inbox_review_revision,
         custom: launch.custom.clone(),
         // A CLAUDE CLOUD box sends the text as the cloud task instead —
         // `claude --cloud <task>` — and no STARTING PROMPT beside it, which

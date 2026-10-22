@@ -31,6 +31,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::AgentPresets(_) => crate::preset_overlays::handle_list_key(app, key, out),
         Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key),
         Overlay::Issues(_) => crate::issues::handle_key(app, key, out),
+        Overlay::Inbox(_) => crate::inbox::handle_key(app, key, out),
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::Review(_) => {
@@ -240,6 +241,12 @@ fn handle_menu_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
 }
 
 fn handle_prompt_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    if key.code == KeyCode::Char('s')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && crate::inbox::save_review(app, out)
+    {
+        return;
+    }
     let _ = &mut *out;
     let Some(overlay) = &mut app.modals.overlay else {
         return;

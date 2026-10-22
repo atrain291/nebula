@@ -21262,6 +21262,7 @@ fn overlay_label(overlay: &Overlay) -> &'static str {
         Overlay::AgentPresets(_) => "AgentPresets",
         Overlay::AgentPresetEditor(_) => "AgentPresetEditor",
         Overlay::Issues(_) => "Issues",
+        Overlay::Inbox(_) => "Inbox",
         Overlay::PullRequests(_) => "PullRequests",
         Overlay::BranchSwitch(_) => "BranchSwitch",
         Overlay::Review(_) => "Review",

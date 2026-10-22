@@ -3380,7 +3380,9 @@ pub(super) fn target_line(launch: &QuickLaunch, label: &str, width: u16, th: The
     let dim = Style::default().fg(th.dim);
     // Right: the toggle and its state, or — on a PR SESSION — what the
     // DAEMON will do with the head branch, there being nothing to flip.
-    let (right, clickable) = if launch.pr.is_some() {
+    let (right, clickable) = if launch.inbox.is_some() {
+        (vec![Span::styled("[save review] ^S", dim)], true)
+    } else if launch.pr.is_some() {
         (vec![Span::styled("reused or cut on Enter", dim)], false)
     } else if launch.is_new_worktree() {
         let on = Style::default().fg(th.ok).add_modifier(Modifier::BOLD);
@@ -3435,7 +3437,12 @@ pub(super) struct TargetLine {
 /// change them; what is left here is what the box is *for* — an issue, a
 /// pull request, an AGENT PRESET — as the panels' box names them.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
-    let mut head = vec!["New session".to_string()];
+    let mut head = vec![if launch.inbox.is_some() {
+        "Inbox review"
+    } else {
+        "New session"
+    }
+    .to_string()];
     if let Some(issue) = &launch.issue {
         head.push(format!("issue #{}", issue.number));
     }

@@ -350,6 +350,7 @@ pub enum MenuAction {
     ToggleOpenPrs,
     /// Fold / unfold the PROJECT ISSUES GROUP (Worktrees panel menu).
     ToggleIssues,
+    Inbox,
     /// Flip the `hide_draft_prs` SETTING from the Worktrees panel menu:
     /// drafts out of the group and `/`, or back in.
     ToggleDraftPrs,
@@ -2164,6 +2165,7 @@ pub enum Overlay {
     AgentPresetEditor(crate::preset_overlays::AgentPresetEditor),
     /// `i`: the ISSUES MODAL — the project's open GitHub issues.
     Issues(crate::issues::IssuesView),
+    Inbox(crate::inbox::InboxView),
     /// `v`: the PULL REQUESTS MODAL — the project's open pull requests.
     PullRequests(crate::pr_modal::PullRequestsView),
     /// `c`: the BRANCH SWITCHER — the ROOT WORKTREE onto another branch.
@@ -2213,6 +2215,9 @@ pub struct PlaceholderRows {
 /// PROMPT does. A name a surface does set is the user's choice and stays.
 #[derive(Debug, Clone)]
 pub struct AgentLaunchDraft {
+    /// A durable task launch, preserving its identity through the shared creator.
+    pub inbox: Option<nebula_core::InboxId>,
+    pub inbox_review_revision: i64,
     pub worktree: WorktreeId,
     pub kind: AgentKind,
     /// Registry id when `kind` is [`AgentKind::Custom`].
@@ -2267,6 +2272,8 @@ impl AgentLaunchDraft {
         effort: Option<String>,
     ) -> Self {
         Self {
+            inbox: None,
+            inbox_review_revision: 0,
             worktree,
             kind,
             custom: None,
@@ -4340,6 +4347,7 @@ pub struct App {
     pub requests: RequestState,
     pub jobs: JobState,
     pub github: GithubState,
+    pub inbox: crate::inbox::InboxState,
 }
 
 impl Default for App {
@@ -4360,6 +4368,7 @@ impl App {
             requests: RequestState::default(),
             jobs: JobState::default(),
             github: GithubState::default(),
+            inbox: crate::inbox::InboxState::default(),
         };
         app.launcher.columns_recent_prompts_count = 3;
         app

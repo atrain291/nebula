@@ -25,6 +25,14 @@ impl Daemon {
     }
 
     pub(crate) async fn create_agent(self: &Arc<Self>, spec: CreateAgentSpec) -> Result<EntityId> {
+        self.create_agent_for_inbox(spec, None).await
+    }
+
+    pub(crate) async fn create_agent_for_inbox(
+        self: &Arc<Self>,
+        spec: CreateAgentSpec,
+        inbox: Option<nebula_core::InboxId>,
+    ) -> Result<EntityId> {
         let CreateAgentSpec {
             worktree: worktree_id,
             name,
@@ -116,7 +124,12 @@ impl Daemon {
             id: adopted
                 .as_ref()
                 .map(|e| e.agent_id.clone())
-                .unwrap_or_else(AgentId::generate),
+                .unwrap_or_else(|| {
+                    inbox
+                        .as_ref()
+                        .map(|id| AgentId(id.0.clone()))
+                        .unwrap_or_else(AgentId::generate)
+                }),
             worktree_id,
             name: if name.trim().is_empty() {
                 "agent".into()
@@ -165,44 +178,51 @@ impl Daemon {
         let pr_to_insert = pr_url.clone();
         let issue_to_insert = issue_url.clone();
         let prompt_to_insert = prompt_entry.clone();
-        self.store_blocking(move |store| {
-            store.insert_agent_with_launch_context(
+        let inbox_to_insert = inbox.clone();
+        // Publish and install under the same gate Attach/prewarm use.
+        // Otherwise a client can see the committed row before its approved
+        // first prompt is spawned and resume a second, bare PTY beside it.
+        // SQLite and PTY work stay on a blocking worker; no parking_lot
+        // guard crosses an await.
+        let daemon = self.clone();
+        let cold = adopted.is_none();
+        tokio::task::spawn_blocking(move || {
+            let _gate = daemon.spawn_gate.lock();
+            daemon.store.insert_agent_for_inbox(
                 &agent_to_insert,
                 auto_title,
                 pr_to_insert.as_deref(),
                 issue_to_insert.as_deref(),
+                inbox_to_insert.as_ref(),
             )?;
             if let Some(entry) = &prompt_to_insert {
-                store.push_prompt(&agent_to_insert.id, entry)?;
+                daemon.store.push_prompt(&agent_to_insert.id, entry)?;
             }
-            Ok(())
+            if optimistic_run {
+                daemon
+                    .status_machines
+                    .lock()
+                    .insert(agent_to_insert.id.clone(), AgentStatusMachine::launching());
+            }
+            if cold {
+                let spawned = daemon.spawn_agent_session_with(
+                    &agent_to_insert,
+                    &worktree,
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    cloud_prompt.as_deref(),
+                    starting_prompt.as_deref().map(FirstPrompt::Task),
+                );
+                daemon.rollback_agent_on_spawn_error(&agent_to_insert.id, spawned)?;
+            }
+            Ok::<_, anyhow::Error>(())
         })
-        .await?;
+        .await
+        .context("agent install task panicked")??;
         if let Some(entry) = prompt_entry {
             agent.recent_prompts.push(entry);
         }
         let agent = agent;
-        if optimistic_run {
-            // Seeded by hand, ahead of the spawn, so the CLI's own startup
-            // progress-clear cannot green the row out before its turn has
-            // begun — and so nothing seeds a plain `running` machine from
-            // the row first.
-            self.status_machines
-                .lock()
-                .insert(agent.id.clone(), AgentStatusMachine::launching());
-        }
-        if adopted.is_none() {
-            // Cold path: boot the CLI right away.
-            let spawned = self.spawn_agent_session_with(
-                &agent,
-                &worktree,
-                DEFAULT_COLS,
-                DEFAULT_ROWS,
-                cloud_prompt.as_deref(),
-                starting_prompt.as_deref().map(FirstPrompt::Task),
-            );
-            self.rollback_agent_on_spawn_error(&agent.id, spawned)?;
-        }
         let mut broadcast_agent = agent.clone();
         broadcast_agent.alive = true;
         self.broadcast(ServerEvent::EntityUpserted {

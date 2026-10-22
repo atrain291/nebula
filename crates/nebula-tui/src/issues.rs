@@ -1445,7 +1445,7 @@ pub(crate) fn footer_hint(view: &IssuesView) -> &'static str {
     if view.editor.is_some() {
         "Tab/↑↓: field  ⇧Enter/^J: newline  Enter: save to GitHub  Esc: cancel edit"
     } else {
-        "type to filter  ↑/↓ ^n/^p: issue  PgUp/PgDn ^d/^u: read  Enter: prompt an agent  ⇧Tab: preset  ^e: edit  ^c/^y: comment  ^o: browser  ^r: refresh  Esc: clear / close"
+        "type to filter  ↑/↓ ^n/^p: issue  PgUp/PgDn ^d/^u: read  Enter: prompt an agent  ⇧Tab: preset  ^b: inbox  ^e: edit  ^c/^y: comment  ^o: browser  ^r: refresh  Esc: clear / close"
     }
 }
 
@@ -1558,6 +1558,17 @@ pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     if matches!(&app.modals.overlay, Some(Overlay::Issues(v)) if v.editor.is_some()) {
         handle_editor_key(app, key);
+        return;
+    }
+    if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some((issue, _)) = selected_issue(app) {
+            crate::inbox::capture(
+                app,
+                format!("{}\n\n{}", issue.title, issue.body),
+                Some(issue.url),
+                out,
+            );
+        }
         return;
     }
     let Some(Overlay::Issues(view)) = &mut app.modals.overlay else {

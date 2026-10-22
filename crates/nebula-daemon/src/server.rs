@@ -241,6 +241,85 @@ impl ClientConnection {
                 self.spawn_cleanup_merged_worktree(req_id, id, branch, pr_number, pr_url, head_sha);
                 Ok(true)
             }
+            ClientRequest::ListInbox { req_id } => {
+                let result = self.blocking_daemon(|d| d.store.list_inbox()).await;
+                match result {
+                    Ok(items) => {
+                        // Each bounded row includes at most 20 review snapshots.
+                        // One row per frame keeps even worst-case escaped text
+                        // comfortably inside the 4 MiB ceiling.
+                        let pages = items.len().max(1);
+                        for page in 0..pages {
+                            let start = page;
+                            let end = (start + 1).min(items.len());
+                            self.send(ServerEvent::InboxItems {
+                                req_id,
+                                items: items[start..end].to_vec(),
+                                complete: page + 1 == pages,
+                            })
+                            .await;
+                        }
+                    }
+                    Err(e) => reply_done(&self.out_tx, req_id, Err(e)).await,
+                }
+                Ok(true)
+            }
+            ClientRequest::CaptureInbox {
+                req_id,
+                id,
+                original,
+                source_url,
+            } => {
+                let result = self
+                    .blocking_daemon(move |d| {
+                        d.store.capture_inbox(&id, &original, source_url.as_deref())
+                    })
+                    .await;
+                reply_done(&self.out_tx, req_id, result).await;
+                Ok(true)
+            }
+            ClientRequest::SaveInbox { req_id, id, draft } => {
+                let _gate = self.daemon.inbox_ops.lock().await;
+                let result = self
+                    .blocking_daemon(move |d| d.store.save_inbox(&id, &draft))
+                    .await;
+                reply_done(&self.out_tx, req_id, result).await;
+                Ok(true)
+            }
+            ClientRequest::SaveInboxReview {
+                req_id,
+                id,
+                event_id,
+                expected_revision,
+                review,
+            } => {
+                let _gate = self.daemon.inbox_ops.lock().await;
+                let result = self
+                    .blocking_daemon(move |d| {
+                        d.store
+                            .save_inbox_review(&id, &event_id, expected_revision, &review)
+                    })
+                    .await;
+                reply_done(&self.out_tx, req_id, result).await;
+                Ok(true)
+            }
+            ClientRequest::ArchiveInbox {
+                req_id,
+                id,
+                archived,
+            } => {
+                let _gate = self.daemon.inbox_ops.lock().await;
+                let result = self
+                    .blocking_daemon(move |d| d.store.archive_inbox(&id, archived))
+                    .await;
+                reply_done(&self.out_tx, req_id, result).await;
+                Ok(true)
+            }
+            ClientRequest::LaunchInbox { req_id, id, draft } => {
+                let result = self.daemon.launch_inbox(id, draft).await;
+                reply(&self.out_tx, req_id, result.map(Some)).await;
+                Ok(true)
+            }
             ClientRequest::CreateAgent {
                 req_id,
                 worktree,

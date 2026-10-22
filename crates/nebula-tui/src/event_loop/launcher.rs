@@ -2741,6 +2741,10 @@ pub(super) fn click_new_worktree(app: &mut App) {
 /// `quick_prompt_new_worktree` SETTING. A PR SESSION's checkout is the
 /// DAEMON's to pick, so it has nothing to flip.
 fn toggle_new_worktree(app: &mut App, launch: QuickLaunch, input: TextInput) {
+    if launch.inbox.is_some() {
+        app.chrome.flash = Some("inbox: choose an existing worktree (^T)".into());
+        return;
+    }
     match view::flipped_target(app, &launch) {
         Ok(target) => reopen_with(app, QuickLaunch { target, ..launch }, input),
         Err(why) if launch.pr.is_some() => app.chrome.flash = Some(format!("quick prompt: {why}")),
@@ -2901,20 +2905,23 @@ fn open_worktree_picker(app: &mut App, back: QuickReturn) {
             },
         )
     };
-    let fresh = match &back.launch.target {
-        QuickTarget::NewWorktree { .. } => back.launch.target.clone(),
-        QuickTarget::Worktree(_) => view::fresh_worktree(app, project.clone(), &back.launch),
-    };
-    let QuickTarget::NewWorktree { branch, .. } = &fresh else {
-        unreachable!("fresh_worktree mints a new worktree")
-    };
-    let mut items = vec![row(
-        format!(
-            "+ new worktree  {branch}{}",
-            tick(back.launch.is_new_worktree())
-        ),
-        fresh.clone(),
-    )];
+    let mut items = Vec::new();
+    if back.launch.inbox.is_none() {
+        let fresh = match &back.launch.target {
+            QuickTarget::NewWorktree { .. } => back.launch.target.clone(),
+            QuickTarget::Worktree(_) => view::fresh_worktree(app, project.clone(), &back.launch),
+        };
+        let QuickTarget::NewWorktree { branch, .. } = &fresh else {
+            unreachable!("fresh_worktree mints a new worktree")
+        };
+        items.push(row(
+            format!(
+                "+ new worktree  {branch}{}",
+                tick(back.launch.is_new_worktree())
+            ),
+            fresh.clone(),
+        ));
+    }
     for w in checkouts {
         let aimed = back.launch.target == QuickTarget::Worktree(w.id.clone());
         let root = if w.is_main { "  (root)" } else { "" };

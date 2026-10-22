@@ -10,6 +10,7 @@ pub(super) fn draw_overlay(f: &mut Frame, app: &mut App) {
     // box — and any picker the box has up — is drawn over it.
     use crate::quick_prompt::ModalUnder;
     match crate::quick_prompt::modal_under(&overlay) {
+        Some(ModalUnder::Inbox(view)) => crate::inbox::draw(f, app, *view, true),
         Some(ModalUnder::Issues(view)) => crate::issues::draw(f, app, &view, th, true),
         Some(ModalUnder::PullRequests(view)) => crate::pr_modal::draw(f, app, &view, th, true),
         None => {}
@@ -37,6 +38,7 @@ impl Overlay {
             Overlay::Hosts(view) => draw_hosts_overlay(f, app, view),
             Overlay::AgentPresets(view) => draw_agent_presets_overlay(f, app, view),
             Overlay::AgentPresetEditor(editor) => draw_agent_preset_editor_overlay(f, app, editor),
+            Overlay::Inbox(view) => crate::inbox::draw(f, app, view, false),
             Overlay::Issues(view) => draw_issues_overlay(f, app, view),
             Overlay::PullRequests(view) => draw_pull_requests_overlay(f, app, view),
             Overlay::BranchSwitch(view) => draw_branch_switch_overlay(f, app, view),

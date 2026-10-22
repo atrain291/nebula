@@ -36,6 +36,7 @@ id_newtype!(WorktreeId);
 id_newtype!(AgentId);
 id_newtype!(TerminalId);
 id_newtype!(LinkId);
+id_newtype!(InboxId);
 
 #[cfg(test)]
 mod tests {

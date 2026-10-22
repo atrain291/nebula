@@ -849,7 +849,10 @@ pub(crate) fn worktree_menu_items(app: &App, w: &nebula_core::Worktree) -> Vec<M
 pub(crate) fn context_menu_items(app: &App, focus: Focus) -> Option<Vec<MenuItem>> {
     match focus {
         Focus::Projects => {
-            let mut items = vec![MenuItem::new("Add project", MenuAction::AddProject)];
+            let mut items = vec![
+                MenuItem::new("Add project", MenuAction::AddProject),
+                MenuItem::new("Task inbox", MenuAction::Inbox),
+            ];
             if let Some(p) = app.selected_project() {
                 items.insert(
                     0,
@@ -897,7 +900,10 @@ pub(crate) fn context_menu_items(app: &App, focus: Focus) -> Option<Vec<MenuItem
 /// verbs by its own key (`n`, `A`, the OPEN PRS fold, the draft toggle).
 pub(crate) fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
     match focus {
-        Focus::Projects => vec![MenuItem::new("Add project", MenuAction::AddProject)],
+        Focus::Projects => vec![
+            MenuItem::new("Add project", MenuAction::AddProject),
+            MenuItem::new("Task inbox", MenuAction::Inbox),
+        ],
         Focus::Worktrees => app
             .selected_project()
             .map(|p| {

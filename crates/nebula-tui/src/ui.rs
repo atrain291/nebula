@@ -51,6 +51,17 @@ const FOLLOW_UP_PROMPT_SIZE: (u16, u16) = (76, 9);
 /// `^J` still breaks the line, unadvertised, for the terminal that flattens
 /// a shifted Enter (tmux, Terminal.app).
 fn task_prompt_hint(kind: &crate::app::PromptKind, width: u16) -> &'static str {
+    if matches!(kind, crate::app::PromptKind::QuickPrompt(launch) if launch.inbox.is_some()) {
+        return if width >= 65 {
+            " ^S save review · Enter approve and launch · ⇧Enter newline · Esc "
+        } else if width >= 44 {
+            " ^S save · Enter launch · ⇧Enter newline · Esc "
+        } else if width >= 22 {
+            " ^S save · ↵ launch "
+        } else {
+            " Esc · ↵ "
+        };
+    }
     if matches!(kind, crate::app::PromptKind::QuickPrompt(_)) {
         return if width >= 79 {
             " Enter launch · ⇧Enter newline · Tab agent · ⇧Tab preset · ^N worktree · Esc "
@@ -129,7 +140,13 @@ fn quick_target_line(
         None => crate::quick_prompt::target_branch(app, launch)
             .unwrap_or_else(|| "(worktree gone)".into()),
     };
-    let (left, right) = if let Some(pr) = &launch.pr {
+    let (left, right) = if launch.inbox.is_some() {
+        let dim = Style::default().fg(th.dim);
+        (
+            vec![Span::styled(format!("worktree: {branch}"), dim)],
+            vec![Span::styled("save review ^S", dim)],
+        )
+    } else if let Some(pr) = &launch.pr {
         let dim = Style::default().fg(th.dim);
         (
             vec![
@@ -498,7 +515,7 @@ fn draw_multiline_prompt(
     // lie about which press does what.
     let hint = if backdrop {
         ""
-    } else if launcher {
+    } else if launcher && !quick.is_some_and(|launch| launch.inbox.is_some()) {
         launcher_view::box_hint(area.width)
     } else {
         task_prompt_hint(&prompt.kind, area.width)
@@ -950,7 +967,7 @@ pub(crate) fn modal_block<'a>(title: impl Into<std::borrow::Cow<'a, str>>, th: T
 
 /// Clear `area` and draw a [`modal_block`] over it, returning the inner
 /// rect the modal's content goes in.
-fn render_modal_frame<'a>(
+pub(crate) fn render_modal_frame<'a>(
     f: &mut Frame,
     area: Rect,
     title: impl Into<std::borrow::Cow<'a, str>>,
@@ -2604,6 +2621,8 @@ mod tests {
     fn task_prompt_hints_fit_the_border_they_sit_on() {
         use crate::app::PromptKind;
         let quick = PromptKind::QuickPrompt(crate::quick_prompt::QuickLaunch {
+            inbox: None,
+            inbox_review_revision: 0,
             target: crate::quick_prompt::QuickTarget::Worktree(nebula_core::WorktreeId::from(
                 "wt".to_string(),
             )),

@@ -1893,6 +1893,9 @@ pub fn flipped_target(
     app: &App,
     launch: &crate::quick_prompt::QuickLaunch,
 ) -> Result<QuickTarget, &'static str> {
+    if launch.inbox.is_some() {
+        return Err("inbox: choose an existing worktree (^T)");
+    }
     if launch.pr.is_some() {
         return Err("a PR session runs in the pull request's own checkout");
     }

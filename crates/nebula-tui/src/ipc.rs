@@ -234,6 +234,37 @@ pub fn split_connection(conn: Connection) -> IpcChannels {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<ServerEvent>(1024);
     let (req_tx, mut req_rx) = tokio::sync::mpsc::channel::<ClientRequest>(256);
 
+    let gate_tx = event_tx.clone();
+
+    let peer_version = conn.protocol_version;
+    let writer = tokio::spawn(async move {
+        while let Some(req) = req_rx.recv().await {
+            let inbox_req_id = match &req {
+                ClientRequest::ListInbox { req_id }
+                | ClientRequest::CaptureInbox { req_id, .. }
+                | ClientRequest::SaveInbox { req_id, .. }
+                | ClientRequest::ArchiveInbox { req_id, .. }
+                | ClientRequest::SaveInboxReview { req_id, .. }
+                | ClientRequest::LaunchInbox { req_id, .. } => Some(*req_id),
+                _ => None,
+            };
+            if peer_version < nebula_core::INBOX_PROTOCOL {
+                if let Some(req_id) = inbox_req_id {
+                    let _ = gate_tx
+                        .send(ServerEvent::Error {
+                            req_id: Some(req_id),
+                            message: "task inbox needs a v53 daemon; reload Nebula".into(),
+                        })
+                        .await;
+                    continue;
+                }
+            }
+            if write_frame(&mut write_half, &req).await.is_err() {
+                break;
+            }
+        }
+    });
+
     tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(read_half);
         while let Ok(Some(ev)) = read_frame::<ServerEvent, _>(&mut reader).await {
@@ -241,15 +272,9 @@ pub fn split_connection(conn: Connection) -> IpcChannels {
                 break;
             }
         }
-        // Dropping event_tx closes the channel, signalling disconnect.
-    });
-
-    tokio::spawn(async move {
-        while let Some(req) = req_rx.recv().await {
-            if write_frame(&mut write_half, &req).await.is_err() {
-                break;
-            }
-        }
+        // The writer holds gate_tx for local compatibility errors. Drop it
+        // on EOF too, so rx still closes when the socket is disconnected.
+        writer.abort();
     });
 
     IpcChannels {
@@ -1793,5 +1818,48 @@ mod tests {
         // current_exe resolves under a test binary, so this half is never
         // the "unknown" fallback.
         assert!(msg.contains(&format!("v{PROTOCOL_VERSION}")), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod inbox_compat_tests {
+    use super::*;
+    #[tokio::test]
+    async fn inbox_requests_are_gated_for_old_daemons_and_disconnect_still_closes_the_channel() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut channels = split_connection(Connection {
+            stream: client,
+            daemon_pid: 0,
+            protocol_version: 53,
+        });
+        channels
+            .tx
+            .send(ClientRequest::ListInbox { req_id: 99 })
+            .await
+            .unwrap();
+        assert!(matches!(
+            channels.rx.recv().await,
+            Some(ServerEvent::Error {
+                req_id: Some(99),
+                ..
+            })
+        ));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                read_frame::<ClientRequest, _>(&mut server)
+            )
+            .await
+            .is_err(),
+            "old daemon must receive no unknown variant"
+        );
+        drop(server);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), channels.rx.recv())
+                .await
+                .unwrap()
+                .is_none(),
+            "local compatibility errors must not keep a disconnected socket alive"
+        );
     }
 }

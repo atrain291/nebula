@@ -1,0 +1,9 @@
+# Task inbox: two captured tasks, the first read in the pane.
+B
+C-a
+Fix the login redirect after SSO
+Enter
+C-a
+Add retry to the release upload step
+Enter
+Up

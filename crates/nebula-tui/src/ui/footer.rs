@@ -128,6 +128,7 @@ fn overlay_footer_hint(app: &App, overlay: &Overlay, th: Theme) -> FooterHint {
             "Tab/↑↓: next field  ←/→: cycle  Shift+Enter/^J: newline  Enter: save  Esc: back to list",
             th,
         ),
+        Overlay::Inbox(_) => dim_hint(crate::inbox::FOOTER, th),
         Overlay::Issues(view) => dim_hint(crate::issues::footer_hint(view), th),
         Overlay::PullRequests(_) => dim_hint(crate::pr_modal::footer_hint(), th),
         Overlay::BranchSwitch(view) => dim_hint(crate::branch_switch::footer_hint(view), th),
@@ -160,6 +161,9 @@ fn quick_prompt_footer_hint(app: &App, th: Theme) -> FooterHint {
         .as_ref()
         .and_then(crate::quick_prompt::modal_under)
     {
+        Some(crate::quick_prompt::ModalUnder::Inbox(_)) => {
+            "^S: save review  Enter: approve and launch  Esc: cancel"
+        }
         Some(crate::quick_prompt::ModalUnder::Issues(_)) => {
             "Enter: launch  ⇧Tab: preset  Esc: back to issues"
         }

@@ -95,6 +95,7 @@ pub enum Action {
     /// place, commented on, with a QUICK PROMPT or an AGENT PRESET launched
     /// on one.
     Issues,
+    Inbox,
     /// `v`: the PULL REQUESTS MODAL — the project's open pull requests,
     /// read in place, commented on, with a PR SESSION launched on one.
     PullRequests,
@@ -422,6 +423,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["y"],
+    },
+    ActionSpec {
+        action: Action::Inbox,
+        id: "inbox",
+        label: "Task inbox",
+        hint: "Capture, review and explicitly launch durable tasks",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &["shift+b"],
     },
     ActionSpec {
         action: Action::Issues,

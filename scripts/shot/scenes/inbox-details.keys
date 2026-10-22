@@ -1,0 +1,7 @@
+# Task inbox: Ctrl+E opens the reviewed details.
+B
+C-a
+Fix the login redirect after SSO
+Enter
+C-e
+Signed-in users land back on the page they came from

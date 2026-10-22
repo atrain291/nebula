@@ -4,6 +4,16 @@ use super::*;
 
 pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRequest>) {
     match event {
+        ServerEvent::InboxItems {
+            req_id,
+            items,
+            complete,
+        } => {
+            if complete {
+                app.requests.pending.remove(&req_id);
+            }
+            crate::inbox::land_chunk(app, req_id, items, complete);
+        }
         event @ ServerEvent::Snapshot { .. } => handle_snapshot_event(app, event, out),
         event @ ServerEvent::Scrollback { .. }
         | event @ ServerEvent::Output { .. }
@@ -255,6 +265,7 @@ fn handle_ack_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientReque
     let _ = &mut *out;
     match event {
         ServerEvent::Ack { req_id, created } => {
+            crate::inbox::capture_succeeded(app, req_id, out);
             // False for a create the user has navigated away from since
             // firing it (`App::left_behind`): the rows still become the
             // real ones, and nothing below moves a cursor, the pane or
@@ -539,6 +550,9 @@ fn handle_error_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientReq
     let _ = &mut *out;
     match event {
         ServerEvent::Error { req_id, message } => {
+            if let Some(id) = req_id {
+                crate::inbox::capture_failed(app, id);
+            }
             // A DELETE CHECK that failed says so in its confirm.
             if req_id.is_some_and(|id| crate::delete_check::land_error(app, id, &message)) {
                 return;

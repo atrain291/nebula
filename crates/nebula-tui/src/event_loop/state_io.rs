@@ -43,7 +43,9 @@ pub(crate) fn send_with_follow(
 
 pub(crate) fn log_server_event(ev: &ServerEvent) {
     match ev {
-        ServerEvent::Output { .. } | ServerEvent::Scrollback { .. } => {}
+        ServerEvent::Output { .. }
+        | ServerEvent::Scrollback { .. }
+        | ServerEvent::InboxItems { .. } => {}
         other => tracing::debug!(event = ?other, "server event"),
     }
 }

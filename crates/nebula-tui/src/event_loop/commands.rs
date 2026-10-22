@@ -607,6 +607,7 @@ pub(crate) fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<C
                     effort.filter(|e| e != crate::config::DEFAULT_CHOICE),
                     &crate::config::Config::load(),
                 )
+                .with_inbox(back.launch.inbox.clone(), back.launch.inbox_review_revision)
                 .with_issue(back.launch.issue.clone())
                 .with_pr(back.launch.pr.clone())
                 // The Claude row's `Tab` toggle rides the pick: the box
@@ -733,6 +734,7 @@ pub(crate) fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<C
         }
         MenuAction::ToggleArchived => toggle_archived(app, out),
         MenuAction::ToggleOpenPrs => toggle_open_prs(app, out),
+        MenuAction::Inbox => crate::inbox::open(app, out),
         MenuAction::ToggleIssues => toggle_issues(app, out),
         MenuAction::ToggleDraftPrs => toggle_hide_draft_prs(app, out),
         MenuAction::PickLaunchWorktree { target, back } => {

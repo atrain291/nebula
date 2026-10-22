@@ -176,6 +176,9 @@ pub struct Daemon {
     /// Shared with the hook HTTP server, which reads agent rows to decide
     /// auto-title injection.
     pub store: Arc<Store>,
+    /// Serializes task review/archive/launch; acquired before the ordinary
+    /// creator and its spawn gate, never from inside a store/map lock.
+    pub(crate) inbox_ops: tokio::sync::Mutex<()>,
     /// Entity/status deltas fanned out to every subscribed client.
     pub events: broadcast::Sender<ServerEvent>,
     /// Every session the registry installs — a spawn, a respawn, a prewarm
@@ -268,6 +271,7 @@ impl Daemon {
             transcripts: Mutex::new(HashMap::new()),
             pending_moves: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
+            inbox_ops: tokio::sync::Mutex::new(()),
             prewarm_sweep: Mutex::new(None),
             resumes: Mutex::new(HashMap::new()),
             finished_runs: Mutex::new(HashMap::new()),
@@ -4925,5 +4929,75 @@ mod tests {
         }
         daemon.mark_agent_seen(&id).unwrap();
         assert!(rx.try_recv().is_err(), "nothing to say twice");
+    }
+    /// Attach/prewarm must not discover a new row before its approved PTY
+    /// has been installed under the same gate they use to resume sessions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbox_review_initial_spawn_serializes_with_attach() {
+        let _cmd = EnvGuard::set(env::AGENT_CMD, "/bin/cat");
+        let daemon = test_daemon();
+        let (_dir, worktree) = run_worktree(&daemon);
+        let id = nebula_core::InboxId::generate();
+        daemon
+            .store
+            .capture_inbox(&id, "Original task", None)
+            .unwrap();
+        let draft = nebula_core::InboxDraft {
+            review_revision: 0,
+            instructions: "Approved first prompt".into(),
+            worktree: worktree.id,
+            kind: AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+        };
+        let sref = SessionRef::Agent(AgentId(id.0.clone()));
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = daemon.clone();
+        let gate_owner = tokio::task::spawn_blocking(move || {
+            let _gate = blocker.spawn_gate.lock();
+            held_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        });
+        held_rx.await.unwrap();
+        let launcher = daemon.clone();
+        let task = id.clone();
+        let mut launch = tokio::spawn(async move { launcher.launch_inbox(task, draft).await });
+        let premature =
+            tokio::time::timeout(std::time::Duration::from_millis(250), &mut launch).await;
+        let published_early = daemon.store.get_inbox(&id).unwrap().session.is_some();
+        let attacher = daemon.clone();
+        let target = sref.clone();
+        let attach = tokio::task::spawn_blocking(move || attacher.ensure_session(&target, 80, 24));
+        release_tx.send(()).unwrap();
+        gate_owner.await.unwrap();
+        let result = match premature {
+            Ok(result) => result,
+            Err(_) => tokio::time::timeout(std::time::Duration::from_secs(5), launch)
+                .await
+                .unwrap(),
+        };
+        let created = result.unwrap().unwrap();
+        let attached = tokio::time::timeout(std::time::Duration::from_secs(5), attach)
+            .await
+            .unwrap()
+            .unwrap();
+        // An Attach that acquires the gate before the create can refuse a
+        // not-yet-existing row. After create Ack, it always reuses the PTY.
+        let session = daemon.ensure_session(&sref, 80, 24).unwrap();
+        if let Ok(attached) = attached {
+            assert!(Arc::ptr_eq(&session, &attached));
+        }
+        let sessions = daemon.sessions.lock().len();
+        session.kill();
+        assert_eq!(created, EntityId::Agent(AgentId(id.0)));
+        assert_eq!(sessions, 1);
+        assert!(
+            !published_early,
+            "initial create published a resumable row without owning spawn_gate"
+        );
     }
 }

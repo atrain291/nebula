@@ -41,6 +41,8 @@ Files beside it in the DATA DIR: `nebula.db` (the SQLITE STORE), `config.local.j
 `ssh_hosts.json` (the SSH HOSTS FILE), `reviewed.json` (REVIEWED MARKS). All but the database are
 convenience stores: missing or malformed reads as empty.
 
+The [manual task inbox](inbox.md) uses the existing Quick Prompt agent defaults and pickers. Its `Shift+B` binding is configurable as `keybindings.inbox`. Task records live in `nebula.db`, so `NEBULA_DATA_DIR` also isolates inbox captures and approved drafts. No classifier/model configuration is needed.
+
 ## Every setting
 
 Sixty-five keys. **Overlay** is the SETTINGS OVERLAY tab whose row edits the key; `—` means the key

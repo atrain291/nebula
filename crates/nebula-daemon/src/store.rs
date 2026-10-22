@@ -13,6 +13,8 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 
+mod inbox;
+
 const MIGRATIONS: &[&str] = &[
     // 1: initial schema
     "
@@ -332,6 +334,30 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'worker';
     ",
+    // 30: independent task lifecycle; source and approved draft are distinct.
+    // Session links deliberately survive project/worktree/session deletion.
+    "CREATE TABLE inbox (
+        id TEXT PRIMARY KEY,
+        original TEXT NOT NULL,
+        source_url TEXT,
+        draft TEXT,
+        archived INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT UNIQUE,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );",
+    // 31: user-reviewed task criteria and append-only outcome/review audit.
+    "ALTER TABLE inbox ADD COLUMN review TEXT NOT NULL DEFAULT '{}';
+     ALTER TABLE inbox ADD COLUMN review_revision INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE inbox ADD COLUMN launch TEXT;
+     CREATE TABLE inbox_review_history (
+        event_id TEXT PRIMARY KEY,
+        inbox_id TEXT NOT NULL REFERENCES inbox(id),
+        revision INTEGER NOT NULL,
+        review TEXT NOT NULL,
+        saved_at INTEGER NOT NULL,
+        UNIQUE(inbox_id, revision)
+     );",
 ];
 
 pub struct Store {
@@ -533,7 +559,47 @@ impl Store {
         pr_url: Option<&str>,
         issue_url: Option<&str>,
     ) -> Result<()> {
-        self.conn.lock().execute(
+        self.insert_agent_for_inbox(a, auto_title, pr_url, issue_url, None)
+    }
+
+    pub(crate) fn insert_agent_for_inbox(
+        &self,
+        a: &Agent,
+        auto_title: bool,
+        pr_url: Option<&str>,
+        issue_url: Option<&str>,
+        inbox: Option<&nebula_core::InboxId>,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        if let Some(id) = inbox {
+            let (review_json, revision, draft_json): (String, i64, String) = tx.query_row(
+                "SELECT review, review_revision, draft FROM inbox WHERE id = ?1",
+                [id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let review: nebula_core::InboxReview = serde_json::from_str(&review_json)?;
+            let draft: nebula_core::InboxDraft = serde_json::from_str(&draft_json)?;
+            anyhow::ensure!(
+                revision == draft.review_revision,
+                "task details changed; refresh and review before launch"
+            );
+            let launch = nebula_core::InboxLaunch {
+                review_revision: revision,
+                prompt: nebula_core::inbox_launch_prompt(&draft.instructions, &review),
+                review,
+                kind: a.kind,
+                custom_harness: a.custom_harness.clone(),
+                model: a.model.clone(),
+                effort: a.effort.clone(),
+                launched_at: now_ms(),
+            };
+            anyhow::ensure!(tx.execute(
+                "UPDATE inbox SET session_id = ?2, updated_at = ?3, launch = ?4 WHERE id = ?1 AND session_id IS NULL AND archived = 0",
+                params![id.as_str(), a.id.as_str(), now_ms(), serde_json::to_string(&launch)?],
+            )? == 1, "inbox item is archived or already launched");
+        }
+        tx.execute(
             "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, cloud_session_id, pr_url, issue_url, custom_harness, role)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
@@ -559,6 +625,7 @@ impl Store {
                 a.role.as_str(),
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1710,6 +1777,8 @@ mod tests {
     fn table_names_without_workspaces() -> Vec<String> {
         [
             "agents",
+            "inbox",
+            "inbox_review_history",
             "links",
             "pr_seen",
             "projects",
