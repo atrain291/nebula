@@ -332,8 +332,8 @@ pub(super) fn summary(lines: &mut Vec<Line<'static>>, item: &InboxItem) {
     }
     if let Some(launch) = &item.launch {
         lines.push(Line::from(format!(
-            "Launched at {} · criteria revision {} · {} · model {} · effort {}",
-            launch.launched_at,
+            "Launched {} · criteria revision {} · {} · model {} · effort {}",
+            when(launch.launched_at),
             launch.review_revision,
             launch
                 .custom_harness
@@ -354,7 +354,7 @@ pub(super) fn summary(lines: &mut Vec<Line<'static>>, item: &InboxItem) {
         lines.push(Line::from(format!(
             "v{} · {} · {} · event {}",
             event.revision,
-            event.saved_at,
+            when(event.saved_at),
             event.review.outcome.label(),
             event.event_id
         )));
@@ -368,4 +368,26 @@ pub(super) fn summary(lines: &mut Vec<Line<'static>>, item: &InboxItem) {
         }
     }
     lines.push(Line::from(""));
+}
+
+/// A stored epoch-ms stamp as the age the rest of the TUI shows: "3h ago".
+fn when(at_ms: i64) -> String {
+    match crate::hosts::ago_label(crate::app::now_ms() - at_ms) {
+        s if at_ms <= 0 || s.is_empty() => "at an unknown time".into(),
+        s => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::when;
+
+    #[test]
+    fn stamps_read_as_ages_never_raw_milliseconds() {
+        let now = crate::app::now_ms();
+        assert_eq!(when(now), "just now");
+        assert_eq!(when(now - 3 * 3_600_000), "3h ago");
+        assert_eq!(when(0), "at an unknown time");
+        assert_eq!(when(now + 60_000), "at an unknown time");
+    }
 }
