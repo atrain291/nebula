@@ -134,6 +134,11 @@ How links behave:
 - **Only `config.local.json` counts.** `remote_hosts` in `config.json` is ignored,
   because `nebula ssh` copies `config.json` to the machines you connect to, and they
   would start opening links of their own.
+- **List each machine once, and not this one.** A machine listed under two names, or
+  this machine itself, answers with sessions the TUI already shows. The TUI keeps the
+  first copy (this machine's own always wins), drops the rest, and says so in `tui.log`.
+- **`nebula reload` and `nebula upgrade` keep links working.** The restarted daemon
+  ends the old ssh forwards and opens new ones.
 - The user's ssh `ControlMaster` is not used for links, so each link is its own ssh
   connection.
 
@@ -164,8 +169,9 @@ These are refused with "not available on remote hosts":
 - moving a session from one machine to another
 - the checkout tools that run on this machine: the git diff (`g`), file finder (`f`),
   grep (`F`), branch switcher (`b`), file tree, issues and pull requests, and opening
-  the checkout in an editor or terminal. A remote checkout's path is on that machine,
-  and a directory with the same path here is a different checkout.
+  the checkout in an editor or terminal, whether from a key, a menu or a click. A
+  remote checkout's path is on that machine, and a directory with the same path here
+  is a different checkout.
 - what is built from this machine's own state: a project path picked from this disk, a
   session for a pull request (found with this machine's `gh`), and launching a task from
   this machine's inbox into a remote worktree

@@ -540,7 +540,10 @@ impl ClientConnection {
                 Ok(true)
             }
             ClientRequest::ListRemoteHosts { req_id } => {
-                let order = crate::config::remote_hosts().hosts;
+                let order = tokio::task::spawn_blocking(crate::config::remote_hosts)
+                    .await
+                    .unwrap_or_default()
+                    .hosts;
                 let hosts = self.daemon.remotes.snapshot(&order);
                 self.send(ServerEvent::RemoteHosts { req_id, hosts }).await;
                 Ok(true)

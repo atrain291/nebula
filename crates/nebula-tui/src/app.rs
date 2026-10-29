@@ -2889,6 +2889,35 @@ pub struct TreeRows {
     pub links: Vec<Link>,
 }
 
+impl TreeRows {
+    fn len(&self) -> usize {
+        self.projects.len()
+            + self.worktrees.len()
+            + self.agents.len()
+            + self.terminals.len()
+            + self.links.len()
+    }
+
+    fn ids(&self) -> impl Iterator<Item = &str> {
+        self.projects
+            .iter()
+            .map(|p| p.id.as_str())
+            .chain(self.worktrees.iter().map(|w| w.id.as_str()))
+            .chain(self.agents.iter().map(|a| a.id.as_str()))
+            .chain(self.terminals.iter().map(|t| t.id.as_str()))
+            .chain(self.links.iter().map(|l| l.id.as_str()))
+    }
+
+    /// Keep only the rows whose id passes `keep`.
+    fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.projects.retain(|p| keep(p.id.as_str()));
+        self.worktrees.retain(|w| keep(w.id.as_str()));
+        self.agents.retain(|a| keep(a.id.as_str()));
+        self.terminals.retain(|t| keep(t.id.as_str()));
+        self.links.retain(|l| keep(l.id.as_str()));
+    }
+}
+
 /// The raw id an [`EntityId`] wraps, as [`Tree::remote`] keys it.
 pub fn entity_key(id: &nebula_core::EntityId) -> &str {
     use nebula_core::EntityId as E;
@@ -2917,7 +2946,14 @@ impl Tree {
     /// Put one daemon's rows in place of what it sent before, leaving every
     /// other daemon's alone: `host` None is the local daemon, whose rows
     /// go first, the way a tree with no remotes has always been ordered.
-    pub fn replace_rows(&mut self, host: Option<&str>, rows: TreeRows) {
+    ///
+    /// An id another daemon's row already has is never taken over: ULIDs
+    /// don't collide by chance, so the same id from a REMOTE HOST means the
+    /// same daemon answering twice — this machine listed in `remote_hosts`,
+    /// or one machine under two names — or a remote claiming rows that are
+    /// not its own. The remote's copy is dropped, and the local daemon's
+    /// always wins. Returns how many incoming rows were dropped.
+    pub fn replace_rows(&mut self, host: Option<&str>, mut rows: TreeRows) -> usize {
         fn swap<T>(have: &mut Vec<T>, incoming: Vec<T>, first: bool, keep: impl Fn(&T) -> bool) {
             let kept: Vec<T> = std::mem::take(have).into_iter().filter(keep).collect();
             if first {
@@ -2928,41 +2964,66 @@ impl Tree {
                 have.extend(incoming);
             }
         }
-        let incoming: Vec<String> = match host {
-            None => Vec::new(),
-            Some(_) => rows
-                .projects
-                .iter()
-                .map(|p| p.id.0.clone())
-                .chain(rows.worktrees.iter().map(|w| w.id.0.clone()))
-                .chain(rows.agents.iter().map(|a| a.id.0.clone()))
-                .chain(rows.terminals.iter().map(|t| t.id.0.clone()))
-                .chain(rows.links.iter().map(|l| l.id.0.clone()))
+        // Ids held by a daemon other than `host`.
+        let elsewhere: std::collections::HashSet<String> = match host {
+            None => std::collections::HashSet::new(),
+            Some(_) => self
+                .ids()
+                .filter(|id| self.host_of(id) != host)
+                .map(str::to_owned)
                 .collect(),
         };
+        let before = rows.len();
+        rows.retain(|id| !elsewhere.contains(id));
+        let dropped = before - rows.len();
+        let incoming: std::collections::HashSet<String> = rows.ids().map(str::to_owned).collect();
         let remote = &self.remote;
-        let others = |id: &str| remote.get(id).map(String::as_str) != host;
+        // Keep the other daemons' rows — but on a local resync, not a
+        // remote row wearing an id the local daemon now sends.
+        let keep = |id: &str| {
+            let owner = remote.get(id).map(String::as_str);
+            owner != host && !(host.is_none() && incoming.contains(id))
+        };
         let first = host.is_none();
         swap(&mut self.projects, rows.projects, first, |p| {
-            others(p.id.as_str())
+            keep(p.id.as_str())
         });
         swap(&mut self.worktrees, rows.worktrees, first, |w| {
-            others(w.id.as_str())
+            keep(w.id.as_str())
         });
         swap(&mut self.agents, rows.agents, first, |a| {
-            others(a.id.as_str())
+            keep(a.id.as_str())
         });
         swap(&mut self.terminals, rows.terminals, first, |t| {
-            others(t.id.as_str())
+            keep(t.id.as_str())
         });
-        swap(&mut self.links, rows.links, first, |l| {
-            others(l.id.as_str())
-        });
-        if let Some(host) = host {
-            self.remote.retain(|_, h| h != host);
-            self.remote
-                .extend(incoming.into_iter().map(|id| (id, host.to_owned())));
+        swap(&mut self.links, rows.links, first, |l| keep(l.id.as_str()));
+        match host {
+            Some(host) => {
+                self.remote.retain(|_, h| h != host);
+                self.remote
+                    .extend(incoming.into_iter().map(|id| (id, host.to_owned())));
+            }
+            None => self.remote.retain(|id, _| !incoming.contains(id)),
         }
+        dropped
+    }
+
+    /// Every row id in the tree.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.projects
+            .iter()
+            .map(|p| p.id.as_str())
+            .chain(self.worktrees.iter().map(|w| w.id.as_str()))
+            .chain(self.agents.iter().map(|a| a.id.as_str()))
+            .chain(self.terminals.iter().map(|t| t.id.as_str()))
+            .chain(self.links.iter().map(|l| l.id.as_str()))
+    }
+
+    /// Does a daemon other than `host` already own a row with this id?
+    /// The test [`Tree::replace_rows`] applies, for one row at a time.
+    pub fn claimed_elsewhere(&self, id: &str, host: &str) -> bool {
+        self.host_of(id) != Some(host) && self.ids().any(|have| have == id)
     }
 
     /// A project's name as tabs and lists show it: `api @desktop` for one

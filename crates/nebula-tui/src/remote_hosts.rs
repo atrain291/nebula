@@ -57,6 +57,10 @@ pub struct Conns {
     msg_tx: mpsc::UnboundedSender<Msg>,
     pub rx: mpsc::UnboundedReceiver<Msg>,
     conns: HashMap<String, Conn>,
+    /// The req ids sent to each host and not yet answered: an Ack or Error
+    /// counts only from the host it was sent to, and a connection that
+    /// closes fails the ones it still owed.
+    pending: HashMap<u64, String>,
 }
 
 impl Default for Conns {
@@ -66,6 +70,7 @@ impl Default for Conns {
             msg_tx,
             rx,
             conns: HashMap::new(),
+            pending: HashMap::new(),
         }
     }
 }
@@ -116,10 +121,38 @@ impl Conns {
     }
 
     /// Hand `req` to `host`'s connection; false when there is none.
-    pub fn send(&self, host: &str, req: ClientRequest) -> bool {
-        self.conns
+    pub fn send(&mut self, host: &str, req: ClientRequest) -> bool {
+        let req_id = req_id_of(&req);
+        let sent = self
+            .conns
             .get(host)
-            .is_some_and(|conn| conn.tx.send(req).is_ok())
+            .is_some_and(|conn| conn.tx.send(req).is_ok());
+        if let (true, Some(req_id)) = (sent, req_id) {
+            self.pending.insert(req_id, host.to_owned());
+        }
+        sent
+    }
+
+    /// Was `req_id` sent to `host`? Forgets it: an id is answered once.
+    fn answered_by(&mut self, req_id: u64, host: &str) -> bool {
+        match self.pending.get(&req_id) {
+            Some(h) if h == host => self.pending.remove(&req_id).is_some(),
+            _ => false,
+        }
+    }
+
+    /// The req ids `host` still owed, forgotten.
+    fn owed_by(&mut self, host: &str) -> Vec<u64> {
+        let owed: Vec<u64> = self
+            .pending
+            .iter()
+            .filter(|(_, h)| h.as_str() == host)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &owed {
+            self.pending.remove(id);
+        }
+        owed
     }
 
     /// Forget a connection that reported itself closed.
@@ -175,6 +208,25 @@ async fn run(
         Err(e) => format!("{e:#}"),
     };
     let _ = msg_tx.send(Msg::Closed(host, why));
+}
+
+/// A request's `req_id`, for the ones the daemon answers with an Ack or
+/// an Error. The PTY traffic carries none, and is the bulk of what a remote
+/// connection sends, so it is ruled out before anything is encoded.
+fn req_id_of(req: &ClientRequest) -> Option<u64> {
+    use ClientRequest as R;
+    match req {
+        R::Input { .. } | R::Resize { .. } | R::Attach { .. } | R::Detach { .. } => None,
+        // Every variant names it `req_id`; reading it off the encoding
+        // keeps this from needing an arm per variant.
+        other => serde_json::to_value(other)
+            .ok()?
+            .as_object()?
+            .values()
+            .next()?
+            .get("req_id")?
+            .as_u64(),
+    }
 }
 
 /// Where one queued request goes.
@@ -310,17 +362,40 @@ pub fn land_status(
 /// An event from a remote connection.
 pub fn land(app: &mut App, conns: &mut Conns, msg: Msg, out: &mut Vec<ClientRequest>) {
     match msg {
-        Msg::Event(host, event) => land_event(app, &host, *event, out),
+        Msg::Event(host, event) => land_event(app, conns, &host, *event, out),
         Msg::Closed(host, why) => {
             tracing::info!(%host, %why, "remote host connection closed");
             conns.forget(&host);
+            // What it never answered fails here, so a change shown on the
+            // keypress rolls back rather than waiting forever.
+            for req_id in conns.owed_by(&host) {
+                crate::event_loop::handle_server_event(
+                    app,
+                    ServerEvent::Error {
+                        req_id: Some(req_id),
+                        message: format!("{host} disconnected before answering"),
+                    },
+                    out,
+                );
+            }
             drop_host(app, &host, out);
         }
     }
 }
 
-fn land_event(app: &mut App, host: &str, event: ServerEvent, out: &mut Vec<ClientRequest>) {
+/// One event from `host`'s daemon. It may speak only for its own rows and
+/// its own requests: anything naming a row another daemon owns, or
+/// answering a request it was not sent, is dropped.
+fn land_event(
+    app: &mut App,
+    conns: &mut Conns,
+    host: &str,
+    event: ServerEvent,
+    out: &mut Vec<ClientRequest>,
+) {
     use crate::event_loop::handle_server_event;
+    let owns = |app: &App, id: &str| app.tree.host_of(id) == Some(host);
+    let owns_session = |app: &App, s: &SessionRef| app.tree.host_of_session(s) == Some(host);
     match event {
         ServerEvent::Snapshot {
             projects,
@@ -332,7 +407,7 @@ fn land_event(app: &mut App, host: &str, event: ServerEvent, out: &mut Vec<Clien
         } => {
             let before = crate::event_loop::selection_snapshot(app);
             let ids: Vec<_> = projects.iter().map(|p| p.id.clone()).collect();
-            app.tree.replace_rows(
+            let dropped = app.tree.replace_rows(
                 Some(host),
                 TreeRows {
                     projects,
@@ -342,10 +417,22 @@ fn land_event(app: &mut App, host: &str, event: ServerEvent, out: &mut Vec<Clien
                     links,
                 },
             );
+            if dropped > 0 {
+                tracing::warn!(
+                    %host,
+                    dropped,
+                    "remote host sent rows another daemon already has; is this machine, or one \
+                     machine twice, in remote_hosts?"
+                );
+            }
             // A host's projects get tabs the first time it shows up in
             // this run, behind the local ones; closing one keeps it closed
             // until the next launch.
             if app.chrome.remote_tabs_opened.insert(host.to_owned()) {
+                let ids: Vec<_> = ids
+                    .into_iter()
+                    .filter(|id| owns(app, id.as_str()))
+                    .collect();
                 for id in ids {
                     if !app.launcher.launcher_tabs.contains(&id) {
                         app.launcher.launcher_tabs.push(id);
@@ -364,11 +451,18 @@ fn land_event(app: &mut App, host: &str, event: ServerEvent, out: &mut Vec<Clien
                 Entity::Terminal(t) => t.id.0.clone(),
                 Entity::Link(l) => l.id.0.clone(),
             };
+            if app.tree.claimed_elsewhere(&id, host) {
+                tracing::warn!(%host, %id, "remote host sent a row another daemon has; dropped");
+                return;
+            }
             app.tree.remote.insert(id, host.to_owned());
             handle_server_event(app, ServerEvent::EntityUpserted { entity }, out);
         }
         ServerEvent::EntityRemoved { id } => {
             let key = entity_key(&id).to_owned();
+            if !owns(app, &key) {
+                return;
+            }
             let before = live_ids(&app.tree);
             handle_server_event(app, ServerEvent::EntityRemoved { id }, out);
             app.tree.remote.remove(&key);
@@ -385,9 +479,13 @@ fn land_event(app: &mut App, host: &str, event: ServerEvent, out: &mut Vec<Clien
             req_id,
             created: Some(created),
         } => {
-            app.tree
-                .remote
-                .insert(entity_key(&created).to_owned(), host.to_owned());
+            if !conns.answered_by(req_id, host) {
+                return;
+            }
+            let key = entity_key(&created).to_owned();
+            if !app.tree.claimed_elsewhere(&key, host) {
+                app.tree.remote.insert(key, host.to_owned());
+            }
             handle_server_event(
                 app,
                 ServerEvent::Ack {
@@ -397,18 +495,34 @@ fn land_event(app: &mut App, host: &str, event: ServerEvent, out: &mut Vec<Clien
                 out,
             );
         }
-        // Status, the attached pane's bytes, request answers: the same as
-        // the local daemon's. Req ids come from the one counter, so an
-        // answer can't be taken for another daemon's.
+        // Status and the attached pane's bytes, for its own sessions only.
+        ServerEvent::StatusChanged { ref agent, .. } if !owns(app, agent.as_str()) => {}
+        ServerEvent::Scrollback { ref session, .. }
+        | ServerEvent::Output { ref session, .. }
+        | ServerEvent::SessionExited { ref session, .. }
+        | ServerEvent::KittyFlags { ref session, .. }
+        | ServerEvent::AttachRefused { ref session, .. }
+        | ServerEvent::OutputTail { ref session, .. }
+            if !owns_session(app, session) => {}
         event @ (ServerEvent::StatusChanged { .. }
         | ServerEvent::Scrollback { .. }
         | ServerEvent::Output { .. }
         | ServerEvent::SessionExited { .. }
         | ServerEvent::KittyFlags { .. }
         | ServerEvent::AttachRefused { .. }
-        | ServerEvent::OutputTail { .. }
-        | ServerEvent::Ack { .. }
-        | ServerEvent::Error { .. }) => handle_server_event(app, event, out),
+        | ServerEvent::OutputTail { .. }) => handle_server_event(app, event, out),
+        // An Error no request owns would only put its text on screen.
+        ServerEvent::Error { req_id: None, .. } => {}
+        // Answers to the requests sent to it. Req ids come from the one
+        // counter, so they can't be taken for another daemon's.
+        ServerEvent::Ack { req_id, .. }
+        | ServerEvent::Error {
+            req_id: Some(req_id),
+            ..
+        } if !conns.answered_by(req_id, host) => {}
+        event @ (ServerEvent::Ack { .. } | ServerEvent::Error { .. }) => {
+            handle_server_event(app, event, out)
+        }
         // Meant for that machine's own screen: a review it opened, files
         // an agent there asked for, its inbox and metrics.
         _ => {}
@@ -427,31 +541,33 @@ fn drop_host(app: &mut App, host: &str, out: &mut Vec<ClientRequest>) {
     app.chrome.dirty = true;
 }
 
-/// Every row id in the tree.
+/// Every row id in the tree, owned.
 fn live_ids(tree: &Tree) -> HashSet<String> {
-    tree.projects
-        .iter()
-        .map(|p| p.id.0.clone())
-        .chain(tree.worktrees.iter().map(|w| w.id.0.clone()))
-        .chain(tree.agents.iter().map(|a| a.id.0.clone()))
-        .chain(tree.terminals.iter().map(|t| t.id.0.clone()))
-        .chain(tree.links.iter().map(|l| l.id.0.clone()))
-        .collect()
+    tree.ids().map(str::to_owned).collect()
 }
 
-/// For a key that would run git, `gh`, an editor or a file view in the
-/// selected checkout: true, with a flash, when a REMOTE HOST owns it. Its
-/// path names a directory on that machine, and a same-named one here is
-/// some other checkout.
-pub fn refuse_local_view(app: &mut App) -> bool {
-    let remote = app
-        .selected_worktree()
-        .is_some_and(|w| app.tree.is_remote_worktree(&w.id));
+/// For a tool that runs git, `gh`, an editor or a file view in a checkout
+/// or repo: true, with a flash, when a REMOTE HOST owns the row `id` (a
+/// worktree or a project). Its path names a directory on that machine, and
+/// a same-named one here is some other checkout. Each such tool asks this
+/// itself, so a menu row or a click reaches it as surely as a key.
+pub fn refuse_remote(app: &mut App, id: &str) -> bool {
+    let remote = app.tree.host_of(id).is_some();
     if remote {
         app.chrome.flash = Some(REFUSED.into());
         app.chrome.dirty = true;
     }
     remote
+}
+
+/// [`refuse_remote`] for the selected checkout, or with none selected,
+/// the selected project.
+pub fn refuse_local_view(app: &mut App) -> bool {
+    let id = app
+        .selected_worktree()
+        .map(|w| w.id.0.clone())
+        .or_else(|| app.selected_project().map(|p| p.id.0.clone()));
+    id.is_some_and(|id| refuse_remote(app, &id))
 }
 
 /// The footer's word on each link: `desktop ✓`, `server ↻`.
@@ -553,6 +669,7 @@ mod tests {
             .replace_rows(None, rows("p1", "api", "w1", &["a1"]));
         land_event(
             &mut app,
+            &mut Conns::default(),
             "desk",
             snapshot(rows("p9", "web", "w9", &["a9"])),
             &mut Vec::new(),
@@ -579,6 +696,7 @@ mod tests {
         // The host's resync keeps the local rows.
         land_event(
             &mut app,
+            &mut Conns::default(),
             "desk",
             snapshot(rows("p9", "web", "w9", &["a8"])),
             &mut Vec::new(),
@@ -612,6 +730,7 @@ mod tests {
         app.launcher.launcher_tabs.retain(|id| id.as_str() != "p9");
         land_event(
             &mut app,
+            &mut Conns::default(),
             "desk",
             snapshot(rows("p9", "web", "w9", &["a9"])),
             &mut Vec::new(),
@@ -625,6 +744,7 @@ mod tests {
         let mut out = Vec::new();
         land_event(
             &mut app,
+            &mut Conns::default(),
             "desk",
             ServerEvent::EntityUpserted {
                 entity: Entity::Agent(agent("a7", "w9")),
@@ -635,6 +755,7 @@ mod tests {
         // Removing the worktree cascades its sessions away, owners too.
         land_event(
             &mut app,
+            &mut Conns::default(),
             "desk",
             ServerEvent::EntityRemoved {
                 id: EntityId::Worktree(WorktreeId("w9".into())),
@@ -655,8 +776,11 @@ mod tests {
     #[test]
     fn an_ack_tells_where_the_created_row_lives() {
         let mut app = app();
+        let mut conns = Conns::default();
+        conns.pending.insert(42, "desk".into());
         land_event(
             &mut app,
+            &mut conns,
             "desk",
             ServerEvent::Ack {
                 req_id: 42,
@@ -679,6 +803,7 @@ mod tests {
         // An unrelated removal leaves that owner alone.
         land_event(
             &mut app,
+            &mut Conns::default(),
             "desk",
             ServerEvent::EntityRemoved {
                 id: EntityId::Agent(AgentId("a9".into())),
@@ -797,6 +922,144 @@ mod tests {
         let app = app();
         assert!(app.tree.is_remote_worktree(&WorktreeId("w9".into())));
         assert!(!app.tree.is_remote_worktree(&WorktreeId("w1".into())));
+    }
+
+    /// This machine in `remote_hosts`, or one machine under two names: the
+    /// same daemon answers twice with the same ids. The second copy is
+    /// dropped, and the rows stay with whoever had them.
+    #[test]
+    fn a_host_cannot_take_over_rows_another_daemon_has() {
+        let mut app = app();
+        // "self" answers with the local daemon's own ids.
+        land_event(
+            &mut app,
+            &mut Conns::default(),
+            "self",
+            snapshot(rows("p1", "api", "w1", &["a1"])),
+            &mut Vec::new(),
+        );
+        // ... and "desk2" with desk's.
+        land_event(
+            &mut app,
+            &mut Conns::default(),
+            "desk2",
+            snapshot(rows("p9", "web", "w9", &["a9"])),
+            &mut Vec::new(),
+        );
+        assert_eq!(agent_ids(&app), ["a1", "a9"], "no row twice");
+        assert_eq!(app.tree.host_of("a1"), None, "local stays local");
+        assert_eq!(app.tree.host_of("a9"), Some("desk"));
+        // Nor one row at a time.
+        land_event(
+            &mut app,
+            &mut Conns::default(),
+            "self",
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(agent("a1", "w1")),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(app.tree.host_of("a1"), None);
+        // A remote can't remove, or speak for, a row it doesn't own.
+        land_event(
+            &mut app,
+            &mut Conns::default(),
+            "desk",
+            ServerEvent::EntityRemoved {
+                id: EntityId::Agent(AgentId("a1".into())),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(agent_ids(&app), ["a1", "a9"]);
+        // The local daemon wins a clash it resyncs into.
+        app.tree
+            .replace_rows(None, rows("p1", "api", "w1", &["a1", "a9"]));
+        assert_eq!(agent_ids(&app), ["a1", "a9"]);
+        assert_eq!(app.tree.host_of("a9"), None);
+    }
+
+    /// Every way into a checkout-local tool refuses a remote worktree — a
+    /// menu row as surely as a key — and runs nothing here.
+    #[test]
+    fn checkout_tools_refuse_a_remote_worktree_from_any_entry() {
+        use crate::app::MenuAction;
+        let mut app = app();
+        let w9 = WorktreeId("w9".into());
+        for action in [
+            MenuAction::SwitchBranch(w9.clone()),
+            MenuAction::OpenWorktree(w9.clone()),
+        ] {
+            app.chrome.flash = None;
+            crate::event_loop::run_menu_action(&mut app, action, &mut Vec::new());
+            assert_eq!(app.chrome.flash.as_deref(), Some(REFUSED));
+            assert!(app.modals.overlay.is_none(), "nothing opened");
+        }
+        // And the local checkout's menu still opens its switcher.
+        app.chrome.flash = None;
+        crate::event_loop::run_menu_action(
+            &mut app,
+            MenuAction::SwitchBranch(WorktreeId("w1".into())),
+            &mut Vec::new(),
+        );
+        assert_ne!(app.chrome.flash.as_deref(), Some(REFUSED));
+    }
+
+    #[test]
+    fn answers_count_only_from_the_host_asked() {
+        let mut app = app();
+        let mut conns = Conns::default();
+        conns.pending.insert(7, "desk".into());
+        // An answer from another host is not desk's to give.
+        land_event(
+            &mut app,
+            &mut conns,
+            "srv",
+            ServerEvent::Ack {
+                req_id: 7,
+                created: Some(EntityId::Agent(AgentId("a5".into()))),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(app.tree.host_of("a5"), None);
+        assert!(conns.pending.contains_key(&7));
+        // A closed connection fails what it owed.
+        app.requests
+            .pending
+            .insert(7, crate::app::PendingIntent::None);
+        land(
+            &mut app,
+            &mut conns,
+            Msg::Closed("desk".into(), "gone".into()),
+            &mut Vec::new(),
+        );
+        assert!(!app.requests.pending.contains_key(&7));
+        assert!(conns.pending.is_empty());
+    }
+
+    #[test]
+    fn the_req_id_is_read_off_any_answered_request() {
+        assert_eq!(
+            req_id_of(&ClientRequest::RenameAgent {
+                req_id: 11,
+                id: AgentId("a".into()),
+                name: "x".into()
+            }),
+            Some(11)
+        );
+        assert_eq!(req_id_of(&ClientRequest::GetMetrics { req_id: 3 }), Some(3));
+        assert_eq!(
+            req_id_of(&ClientRequest::MarkAgentSeen {
+                id: AgentId("a".into())
+            }),
+            None
+        );
+        assert_eq!(
+            req_id_of(&ClientRequest::Input {
+                session: SessionRef::Agent(AgentId("a".into())),
+                data: Vec::new()
+            }),
+            None
+        );
     }
 
     #[test]

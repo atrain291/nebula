@@ -251,6 +251,9 @@ pub(crate) enum Command {
     /// Resolves a session by id or unambiguous fuzzy name, then prints clean
     /// recent conversation text. Claude transcript text is preferred when
     /// available; otherwise nebula falls back to stripped PTY scrollback.
+    /// `<host>:<session>` reads a session on that remote host (`nebula
+    /// remotes`); a prefix that names one always means that host, even
+    /// when a session here is named that way.
     #[command(after_help = READ_EXAMPLES)]
     Read {
         /// Session id or unambiguous fuzzy name.
@@ -287,7 +290,8 @@ pub(crate) enum Command {
     /// Sends a labelled prompt into the target agent, waits for that turn to
     /// finish, and prints only the answer text captured from the target's
     /// output. If the target is busy, the default is to wait until it is idle
-    /// before sending; --no-wait fails fast instead.
+    /// before sending; --no-wait fails fast instead. `<host>:<session>` asks
+    /// a session on that remote host (`nebula remotes`).
     #[command(after_help = ASK_EXAMPLES)]
     Ask {
         /// Target agent id or unambiguous fuzzy name.

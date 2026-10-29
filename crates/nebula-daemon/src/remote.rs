@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
@@ -83,6 +82,10 @@ const ENDPOINT_SCRIPT: &str = concat!(
 #[derive(Default)]
 pub struct Remotes {
     states: Mutex<BTreeMap<String, RemoteLinkState>>,
+    /// Each link's `ssh -N`, by host, while it runs — for an IN-PLACE
+    /// RESTART, whose `exec` keeps the runtime and so never drops the
+    /// `Child` that would kill it ([`Remotes::kill_links`]).
+    forwards: Mutex<BTreeMap<String, u32>>,
 }
 
 impl Remotes {
@@ -108,6 +111,40 @@ impl Remotes {
     fn forget(&self, host: &str) {
         self.states.lock().remove(host);
     }
+
+    /// End every link's `ssh -N` now. Called just before an IN-PLACE
+    /// RESTART `exec`s: the new image opens links of its own, and an old
+    /// forward left running would hold its connection open for good,
+    /// keepalives and all, as a child nothing waits on.
+    pub fn kill_links(&self) {
+        for (host, pid) in std::mem::take(&mut *self.forwards.lock()) {
+            let pid = nix::unistd::Pid::from_raw(pid as i32);
+            if let Err(e) = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM) {
+                tracing::debug!(%host, error = %e, "remote host forward already gone");
+            }
+        }
+    }
+}
+
+/// A link's `ssh -N` in [`Remotes::forwards`] for as long as this lives.
+struct Tracked<'a> {
+    remotes: &'a Remotes,
+    host: &'a str,
+}
+
+impl<'a> Tracked<'a> {
+    fn new(remotes: &'a Remotes, host: &'a str, ssh: &Child) -> Self {
+        if let Some(pid) = ssh.id() {
+            remotes.forwards.lock().insert(host.to_owned(), pid);
+        }
+        Self { remotes, host }
+    }
+}
+
+impl Drop for Tracked<'_> {
+    fn drop(&mut self) {
+        self.remotes.forwards.lock().remove(self.host);
+    }
 }
 
 /// Keep one link task per configured host until the daemon shuts down.
@@ -120,7 +157,9 @@ pub async fn supervise(daemon: Arc<Daemon>) {
             _ = daemon.shutdown.cancelled() => break,
             _ = interval.tick() => {}
         }
-        let read = crate::config::remote_hosts();
+        let read = tokio::task::spawn_blocking(crate::config::remote_hosts)
+            .await
+            .unwrap_or_default();
         // Logged when the list changes, not on every reread.
         if read.ignored != ignored {
             if !read.ignored.is_empty() {
@@ -201,10 +240,11 @@ async fn hold_link(
         r = remote_endpoint(host) => r?,
     };
     ensure_remotes_dir()?;
-    let mut ssh = spawn_forward(host, socket, &remote_socket)?;
+    let (mut ssh, last_err) = spawn_forward(host, socket, &remote_socket)?;
+    let _tracked = Tracked::new(remotes, host, &ssh);
     let protocol_version = tokio::select! {
         _ = stop.cancelled() => return Ok(()),
-        r = await_forward(&mut ssh, socket) => r?,
+        r = await_forward(&mut ssh, &last_err, socket) => r?,
     };
     tracing::info!(%host, protocol_version, "remote host link up");
     remotes.set(
@@ -222,7 +262,7 @@ async fn hold_link(
             _ = stop.cancelled() => return Ok(()),
             status = ssh.wait() => {
                 let status = status.context("wait for ssh")?;
-                bail!("ssh exited ({status}){}", stderr_tail(&mut ssh).await);
+                bail!("ssh exited ({status}){}", stderr_tail(&last_err).await);
             }
             _ = health.tick() => {
                 if let Err(e) = hello(socket).await {
@@ -301,10 +341,23 @@ fn ensure_remotes_dir() -> Result<()> {
         .with_context(|| format!("create {}", dir.display()))
 }
 
-fn spawn_forward(host: &str, socket: &Path, remote_socket: &Path) -> Result<Child> {
+/// The last line a forward's ssh wrote to stderr.
+type LastLine = std::sync::Arc<Mutex<String>>;
+
+fn spawn_forward(host: &str, socket: &Path, remote_socket: &Path) -> Result<(Child, LastLine)> {
+    // `-L` splits its argument at `:`, so a path holding one can't be
+    // forwarded at all; say so rather than let ssh misread it.
+    for path in [socket, remote_socket] {
+        if path.to_string_lossy().contains(':') {
+            bail!(
+                "can't forward {}: ssh's -L can't take a path with ':' in it",
+                path.display()
+            );
+        }
+    }
     // StreamLocalBindUnlink clears a socket file a previous link left
     // behind; without it the bind fails and ExitOnForwardFailure ends ssh.
-    Command::new("ssh")
+    let mut ssh = Command::new("ssh")
         .args(SSH_OPTS)
         .args([
             "-N",
@@ -322,18 +375,37 @@ fn spawn_forward(host: &str, socket: &Path, remote_socket: &Path) -> Result<Chil
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .context("spawn ssh")
+        .context("spawn ssh")?;
+    // Read as it is written: OpenSSH logs a line for every channel the far
+    // end refuses, and a pipe left unread fills and stalls ssh on the next
+    // one. Only the last line is kept, for the error when ssh exits (the
+    // same reason `nebula tunnel` drains its own).
+    let last = LastLine::default();
+    if let Some(stderr) = ssh.stderr.take() {
+        let last = last.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line = line.trim();
+                if !line.is_empty() {
+                    *last.lock() = line.to_owned();
+                }
+            }
+        });
+    }
+    Ok((ssh, last))
 }
 
 /// Poll the forward until the remote daemon answers through it, or ssh
 /// gives up. The socket file appears as soon as ssh binds it, before the
 /// session is fully up, so only a handshake proves the link.
-async fn await_forward(ssh: &mut Child, socket: &Path) -> Result<u32> {
+async fn await_forward(ssh: &mut Child, last_err: &LastLine, socket: &Path) -> Result<u32> {
     let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
     let mut last_error = anyhow!("forward did not come up");
     while tokio::time::Instant::now() < deadline {
         if let Some(status) = ssh.try_wait().context("wait for ssh")? {
-            bail!("ssh exited ({status}){}", stderr_tail(ssh).await);
+            bail!("ssh exited ({status}){}", stderr_tail(last_err).await);
         }
         match hello(socket).await {
             Ok(version) => return Ok(version),
@@ -394,18 +466,16 @@ async fn hello(socket: &Path) -> Result<u32> {
         .map_err(|_| anyhow!("handshake timed out"))?
 }
 
-/// `": <last stderr line>"` from an exited ssh, or nothing.
-async fn stderr_tail(ssh: &mut Child) -> String {
-    let Some(mut stderr) = ssh.stderr.take() else {
-        return String::new();
-    };
-    let mut text = String::new();
-    let _ = tokio::time::timeout(Duration::from_secs(1), stderr.read_to_string(&mut text)).await;
-    text.lines()
-        .map(str::trim)
-        .rfind(|l| !l.is_empty())
-        .map(|l| format!(": {l}"))
-        .unwrap_or_default()
+/// `": <last stderr line>"` from an exited ssh, or nothing. Waits a beat
+/// first: the line that says why ssh quit can trail its exit.
+async fn stderr_tail(last: &LastLine) -> String {
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let line = last.lock().clone();
+    if line.is_empty() {
+        String::new()
+    } else {
+        format!(": {line}")
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +578,45 @@ mod tests {
                 assert!(result.unwrap_err().downcast_ref::<Incompatible>().is_some());
             }
         }
+    }
+
+    /// An IN-PLACE RESTART's `exec` drops no `Child`, so a tracked forward
+    /// has to be ended by pid; one no longer tracked is left alone.
+    #[tokio::test]
+    async fn kill_links_ends_every_tracked_forward() {
+        let remotes = Remotes::default();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let tracked = Tracked::new(&remotes, "desk", &child);
+        remotes.kill_links();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("the forward ends")
+            .unwrap();
+        assert!(!status.success());
+        drop(tracked);
+        assert!(remotes.forwards.lock().is_empty());
+
+        let mut other = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        drop(Tracked::new(&remotes, "srv", &other));
+        remotes.kill_links();
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "untracked keeps running"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_with_a_colon_is_refused_before_ssh_runs() {
+        let err = spawn_forward("desk", Path::new("/run/a:b.sock"), Path::new("/run/d.sock"))
+            .expect_err("refused");
+        assert!(
+            format!("{err:#}").contains("can't take a path with ':'"),
+            "{err:#}"
+        );
     }
 
     #[test]

@@ -530,6 +530,13 @@ pub async fn spawn_on_host(
     let mut req_id = ONE_SHOT_REQ_ID;
     let worktree_id = match &branch {
         Some(branch) => match in_project().find(|w| &w.branch == branch) {
+            // As a local spawn refuses it: a base can't apply to a branch
+            // that already has its checkout.
+            Some(w) if base.is_some() => bail!(
+                "branch `{branch}` already has a worktree on {host} at {}; --base only applies to \
+                 a new branch — run it again without --base to use that worktree",
+                w.path.display()
+            ),
             Some(w) => w.id.clone(),
             None => {
                 write_frame(

@@ -73,6 +73,9 @@ pub(crate) fn in_git_repo(dir: &std::path::Path) -> bool {
 /// cursor's worktree decides, falling back to the project's own clone when
 /// it has no worktrees yet or the one selected is gone from disk.
 pub(crate) fn open_repo_in_browser(app: &mut App) {
+    if crate::remote_hosts::refuse_local_view(app) {
+        return;
+    }
     let root = app
         .selected_worktree()
         .map(|w| w.path.clone())
@@ -114,6 +117,9 @@ pub(crate) fn open_ghostty_tab_with(app: &mut App, ghostty: Option<std::path::Pa
     let Some(ghostty) = ghostty.filter(|_| !app.chrome.is_remote) else {
         return;
     };
+    if crate::remote_hosts::refuse_local_view(app) {
+        return;
+    }
     let dir = app
         .selected_worktree()
         .map(|w| w.path.clone())
@@ -230,6 +236,9 @@ const NO_OPEN_COMMAND: &str =
 /// checkout's `.nebula.json` `open`. The TUI runs it, not the DAEMON: it
 /// opens a browser or an editor on the machine the user is sitting at.
 pub(crate) fn open_worktree(app: &mut App, worktree: &nebula_core::Worktree) {
+    if crate::remote_hosts::refuse_remote(app, worktree.id.as_str()) {
+        return;
+    }
     let main = app
         .tree
         .projects
@@ -316,6 +325,9 @@ pub(crate) fn selected_checkout(app: &mut App) -> Option<(std::path::PathBuf, St
         app.chrome.flash = Some("no worktree selected".into());
         return None;
     };
+    if crate::remote_hosts::refuse_local_view(app) {
+        return None;
+    }
     if !path.is_dir() {
         app.chrome.flash = Some(format!("worktree path missing on disk: {}", path.display()));
         return None;

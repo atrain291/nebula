@@ -653,6 +653,9 @@ pub(crate) fn open_issues(app: &mut App) {
         app.chrome.flash = Some("issues: select a project first".into());
         return;
     };
+    if crate::remote_hosts::refuse_remote(app, project.id.as_str()) {
+        return;
+    }
     let mut view = IssuesView::new(
         project.id.clone(),
         project.name.clone(),
