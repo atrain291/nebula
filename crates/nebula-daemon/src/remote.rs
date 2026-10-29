@@ -265,14 +265,23 @@ async fn remote_endpoint(host: &str) -> Result<PathBuf> {
 
 /// What a failed endpoint call means, worded for `nebula remotes`.
 fn endpoint_failure(code: Option<i32>, stderr: &str) -> String {
-    let last = stderr.lines().map(str::trim).rfind(|l| !l.is_empty());
-    match (code, last) {
+    // nebula's own failures print `Error: <what>` and then its causes;
+    // the `Error:` line says what went wrong, a cause only how.
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("Error: "))
+        .or_else(|| stderr.lines().map(str::trim).rfind(|l| !l.is_empty()));
+    match (code, line) {
         (Some(127), _) => {
             "nebula is not installed there; run `nebula ssh <host>` once to install it".into()
         }
-        // clap's wording for a subcommand it does not know: a remote
-        // nebula from before REMOTE HOST LINKS.
-        _ if stderr.contains("unrecognized subcommand") => {
+        // A nebula from before REMOTE HOST LINKS: clap refuses the
+        // subcommand, or, where a bare word is a folder to open, nebula
+        // looks for a folder named after it.
+        _ if stderr.contains("unrecognized subcommand")
+            || stderr.contains("remote-endpoint does not exist") =>
+        {
             "the nebula there is too old for remote links; run `nebula upgrade` there".into()
         }
         // ssh's own failures (unreachable, auth, host key) exit 255.
@@ -459,6 +468,15 @@ mod tests {
         assert_eq!(
             endpoint_failure(Some(255), "Permission denied (publickey).\n"),
             "ssh: Permission denied (publickey)."
+        );
+        assert!(endpoint_failure(
+            Some(1),
+            "Error: remote-endpoint does not exist\n\nCaused by:\n    No such file or directory (os error 2)\n"
+        )
+        .contains("too old"));
+        assert_eq!(
+            endpoint_failure(Some(1), "Error: disk full\n\nCaused by:\n    os error 28\n"),
+            "disk full"
         );
         assert_eq!(endpoint_failure(Some(1), "boom\n\n"), "boom");
     }

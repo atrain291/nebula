@@ -48,11 +48,18 @@ fn handle_snapshot_event(app: &mut App, event: ServerEvent, out: &mut Vec<Client
             let first_snapshot = !app.chrome.snapshot_loaded;
             app.chrome.snapshot_loaded = true;
             let before = (!first_snapshot).then(|| selection_snapshot(app));
-            app.tree.projects = projects;
-            app.tree.worktrees = worktrees;
-            app.tree.agents = agents;
-            app.tree.terminals = terminals;
-            app.tree.links = links;
+            // The local daemon's rows only: a REMOTE HOST's stay as its
+            // own daemon last sent them.
+            app.tree.replace_rows(
+                None,
+                crate::app::TreeRows {
+                    projects,
+                    worktrees,
+                    agents,
+                    terminals,
+                    links,
+                },
+            );
             app.github.pr_seen = pr_seen.into_iter().map(|s| (s.url, s.marker)).collect();
             // The cache painted rows for whatever the last run's tree had;
             // the ones this tree no longer has go, before they could be

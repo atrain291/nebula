@@ -464,6 +464,7 @@ mod tests {
             ],
             terminals: Vec::new(),
             links: Vec::new(),
+            remote: Default::default(),
         }
     }
 

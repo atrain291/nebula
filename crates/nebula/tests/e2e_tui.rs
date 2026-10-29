@@ -55,6 +55,12 @@ impl TuiHarness {
     /// a stub `gh` on PATH so the pull-request row can be driven without a
     /// GitHub account.
     fn spawn_with_env(extra_env: &[(&str, String)]) -> Self {
+        Self::spawn_with(extra_env, |_| {})
+    }
+
+    /// [`Self::spawn_with_env`], with `setup` handed the fresh data dir
+    /// before nebula starts — for settings it must find on its first read.
+    fn spawn_with(extra_env: &[(&str, String)], setup: impl FnOnce(&Path)) -> Self {
         // Socket paths must stay under SUN_LEN (~104 bytes) — keep the
         // runtime dir short. Tests share one process, so a per-harness
         // sequence keeps each test on its own daemon.
@@ -65,6 +71,8 @@ impl TuiHarness {
         let data_dir = PathBuf::from(format!("/tmp/nebtui-data-{pid}-{seq}"));
         let _ = std::fs::remove_dir_all(&runtime_dir);
         let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        setup(&data_dir);
         let repos = tempfile::tempdir().unwrap();
 
         let pty = native_pty_system()
@@ -1018,4 +1026,97 @@ fn tui_inbox_capture_review_save_cancel_and_explicit_launch() {
     tui.send(&[0x0f]);
     tui.wait_for_gone("Task inbox");
     tui.wait_for_text("inbox task");
+}
+
+/// REMOTE HOSTS end to end: a second nebula stands in for another machine,
+/// an `ssh` stand-in on the PATH reaches it (socat plays the `-L`
+/// forward), and the local TUI shows that machine's project as its own
+/// tab and types into its session.
+#[test]
+fn tui_shows_and_attaches_a_remote_hosts_session() {
+    if std::process::Command::new("socat")
+        .arg("-V")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("skipping: socat is not installed");
+        return;
+    }
+    // The "remote" machine: its own nebula, a project and a session.
+    let mut far = TuiHarness::spawn();
+    let repo = far.make_repo("far");
+    add_project(&mut far, &repo, "far");
+    start_session(&mut far, "remote work");
+
+    let bin = tempfile::tempdir().unwrap();
+    let nebula_dir = Path::new(env!("CARGO_BIN_EXE_nebula")).parent().unwrap();
+    let ssh = bin.path().join("ssh");
+    std::fs::write(
+        &ssh,
+        format!(
+            r#"#!/bin/sh
+fwd=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    -L) fwd="$2"; shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+shift
+if [ -n "$fwd" ]; then
+  exec socat UNIX-LISTEN:"${{fwd%%:*}}",fork,unlink-early UNIX-CONNECT:"${{fwd#*:}}"
+fi
+export HOME='{far_home}' {rt}='{far_rt}' {data}='{far_data}' PATH='{nebula_dir}:/usr/bin:/bin'
+exec sh -c "$*"
+"#,
+            rt = nebula_core::env::RUNTIME_DIR,
+            data = nebula_core::env::DATA_DIR,
+            // Not the real home: its `~/.local/bin/nebula` would win the
+            // remote script's PATH over the build under test.
+            far_home = bin.path().display(),
+            far_rt = far.runtime_dir.display(),
+            far_data = far.data_dir.display(),
+            nebula_dir = nebula_dir.display(),
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut tui = TuiHarness::spawn_with(&[("PATH", path)], |data| {
+        std::fs::write(
+            data.join("config.local.json"),
+            r#"{"remote_hosts":["fakebox"]}"#,
+        )
+        .unwrap();
+    });
+    let near = tui.make_repo("near");
+    add_project(&mut tui, &near, "near");
+
+    // The link comes up, and the far project gets a tab with its host.
+    tui.wait_for_text("far @fakebox");
+    tui.wait_for_text("fakebox ✓");
+
+    // Its tab shows the far session's card; stepping in attaches it, and
+    // what is typed runs over there.
+    let at = find_text(tui.parser.lock().unwrap().screen(), "far @fakebox");
+    let (row, col) = at.expect("far tab");
+    tui.send(&sgr_mouse(0, col, row, false));
+    tui.send(&sgr_mouse(0, col, row, true));
+    tui.wait_for_text("agent-1");
+    tui.send(ENTER);
+    tui.wait_for_text(FOOTER_TERMINAL_LOCKED);
+    tui.type_str("echo far-$((40+2))\r");
+    tui.wait_for_text("far-42");
 }

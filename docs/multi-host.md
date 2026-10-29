@@ -6,8 +6,8 @@ Two pieces make that work:
 - **Agent Mail**: agents on any of your machines share one server, so they see the
   same messages and file reservations.
 - **Remote host links**: your nebula daemon keeps an ssh link to each other machine's
-  daemon. Today you can check the links with `nebula remotes`; showing remote sessions
-  in the TUI builds on them (see [Planned](#planned)).
+  daemon, and the TUI shows those machines' sessions beside this one's (see
+  [Remote sessions in the TUI](#remote-sessions-in-the-tui)).
 
 ## Agent Mail on every machine
 
@@ -137,11 +137,37 @@ How links behave:
 - The user's ssh `ControlMaster` is not used for links, so each link is its own ssh
   connection.
 
+## Remote sessions in the TUI
+
+Once a link is up, the TUI connects to that machine's daemon through it and shows its
+projects and sessions alongside this machine's:
+
+- **Each remote project gets a tab**, named `<project> @<host>`, after the local ones.
+  Tabs open the first time a host shows up in a run; a tab you close stays closed
+  until the next launch.
+- **Cards show live status**, and done and needs-feedback alerts ring for remote
+  sessions as they do for local ones.
+- **Attach and type as usual.** Enter on a remote card attaches it; keys, resizes and
+  scrollback travel over the link.
+- **The footer shows each link**: `desktop ✓` when up, `desktop …` while connecting,
+  `desktop ↻` while retrying. `nebula remotes` has the details.
+- **A host that drops takes its tabs' rows with it**; they come back when the link
+  does.
+
+For now, remote sessions are for watching and typing. These are refused with "not
+available on remote hosts yet":
+
+- creating, renaming, archiving, deleting, restarting or moving a session, and
+  creating or deleting a worktree or terminal, on a remote host
+- the checkout tools that run on this machine: the git diff (`g`), file finder (`f`),
+  grep (`F`), branch switcher (`b`), file tree, issues and pull requests, and opening
+  the checkout in an editor or terminal. A remote checkout's path is on that machine,
+  and a directory with the same path here is a different checkout.
+
+To do those, open that machine's own nebula with `nebula ssh <host>`.
+
 ## Planned
 
-Later phases build on the links:
-
-- The TUI shows each remote host's sessions as cards, with live status, and can attach
-  to them.
+- Create, rename and archive sessions on a remote host from here.
 - `nebula sessions`, `read` and `ask` accept `host:session`, and `spawn` can target a
   remote host.

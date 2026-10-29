@@ -355,6 +355,8 @@ fn handle_navigation_action(
         Action::QuickPrompt if app.launcher_active() => launcher::open_box(app),
         Action::QuickPrompt => crate::quick_prompt::open_quick_prompt(app),
         Action::Inbox => crate::inbox::open(app, out),
+        Action::Issues | Action::PullRequests | Action::SwitchBranch
+            if crate::remote_hosts::refuse_local_view(app) => {}
         Action::Issues => crate::issues::open_issues(app),
         Action::PullRequests => crate::pr_modal::open(app),
         Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),
@@ -630,6 +632,21 @@ fn handle_session_state_action(
 
 fn handle_tool_action(app: &mut App, action: crate::keymap::Action, out: &mut Vec<ClientRequest>) {
     use crate::keymap::Action;
+    // The checkout-local tools work on a directory of this machine.
+    let local_tool = matches!(
+        action,
+        Action::GitDiff
+            | Action::CommentPullRequest
+            | Action::OpenRepo
+            | Action::OpenGhosttyTab
+            | Action::OpenWorktree
+            | Action::FindFile
+            | Action::Grep
+            | Action::TreeBrowser
+    );
+    if local_tool && crate::remote_hosts::refuse_local_view(app) {
+        return;
+    }
     match action {
         // On an open-PR row (either list) `g` reads that pull request's
         // diff off GitHub instead of the checkout's — same modal, different

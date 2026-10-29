@@ -731,6 +731,11 @@ fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
     if app.github.issues_inflight.contains(&project) {
         return;
     }
+    // A REMOTE HOST's repo is on that machine; a same-named path here is
+    // another checkout.
+    if app.tree.host_of(project.as_str()).is_some() {
+        return;
+    }
     if !dir.is_dir() {
         arm_beat(app, &project, false);
         app.github.issues_failed.insert(project);

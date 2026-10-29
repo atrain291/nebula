@@ -42,6 +42,7 @@ pub mod preset_overlays;
 pub mod pull_request;
 pub mod quick_prompt;
 pub mod remote;
+pub mod remote_hosts;
 pub mod review;
 pub mod review_modal;
 pub mod splash;

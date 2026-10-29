@@ -107,7 +107,7 @@ pub(crate) fn own_session() -> std::io::Result<()> {
     Ok(())
 }
 
-async fn handshake(mut stream: UnixStream) -> Result<Connection> {
+pub(crate) async fn handshake(mut stream: UnixStream) -> Result<Connection> {
     // Asked of the kernel before the daemon gets a word in: a daemon on
     // another protocol hangs up right after its answer.
     let listener_pid = peer_pid(&stream);
