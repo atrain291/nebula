@@ -587,12 +587,13 @@ pub async fn spawn_on_host(
     .await?;
     await_created(&mut conn, req_id).await?;
     let place = match &branch {
-        Some(branch) => format!("the worktree on branch \"{branch}\""),
-        None => "its root checkout".to_string(),
+        Some(branch) => format!("worktree on branch \"{branch}\""),
+        None => "root checkout".to_string(),
     };
     println!(
-        "started a new {} session ({host}:{name}) on {host}, in \"{}\" {place}; it is working \
-         on that task now and shows in the sessions list. This session is unaffected — carry on.",
+        "started a new {} session ({host}:{name}) on {host}, in project \"{}\"'s {place}; it is \
+         working on that task now and shows in the sessions list. This session is unaffected — \
+         carry on.",
         kind.as_str(),
         target.name,
     );
