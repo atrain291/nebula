@@ -1028,12 +1028,11 @@ fn tui_inbox_capture_review_save_cancel_and_explicit_launch() {
     tui.wait_for_text("inbox task");
 }
 
-/// REMOTE HOSTS end to end: a second nebula stands in for another machine,
-/// an `ssh` stand-in on the PATH reaches it (socat plays the `-L`
-/// forward), and the local TUI shows that machine's project as its own
-/// tab and types into its session.
-#[test]
-fn tui_shows_and_attaches_a_remote_hosts_session() {
+/// A stand-in for another machine reachable over ssh, and a local TUI
+/// linked to it as `fakebox`: `far` is the other machine's nebula, with a
+/// project `far` and one session; the PATH of `tui` holds an `ssh` that
+/// reaches it (socat plays the `-L` forward). None without socat.
+fn remote_pair() -> Option<(TuiHarness, TuiHarness, tempfile::TempDir)> {
     if std::process::Command::new("socat")
         .arg("-V")
         .stdout(std::process::Stdio::null())
@@ -1041,9 +1040,8 @@ fn tui_shows_and_attaches_a_remote_hosts_session() {
         .is_err()
     {
         eprintln!("skipping: socat is not installed");
-        return;
+        return None;
     }
-    // The "remote" machine: its own nebula, a project and a session.
     let mut far = TuiHarness::spawn();
     let repo = far.make_repo("far");
     add_project(&mut far, &repo, "far");
@@ -1103,40 +1101,53 @@ exec sh -c "$*"
     });
     let near = tui.make_repo("near");
     add_project(&mut tui, &near, "near");
-
     // The link comes up, and the far project gets a tab with its host.
     tui.wait_for_text("far @fakebox");
     tui.wait_for_text("fakebox ✓");
+    Some((far, tui, bin))
+}
 
-    // Its tab shows the far session's card; stepping in attaches it, and
-    // what is typed runs over there.
-    let at = find_text(tui.parser.lock().unwrap().screen(), "far @fakebox");
-    let (row, col) = at.expect("far tab");
+/// Click the PROJECT TAB that reads `tab`.
+fn click_tab(tui: &mut TuiHarness, tab: &str) {
+    let at = find_text(tui.parser.lock().unwrap().screen(), tab);
+    let (row, col) = at.unwrap_or_else(|| panic!("no {tab:?} tab:\n{}", tui.screen_text()));
     tui.send(&sgr_mouse(0, col, row, false));
     tui.send(&sgr_mouse(0, col, row, true));
+}
+
+/// `nebula <args>` against `tui`'s daemon; its stdout.
+fn cli(tui: &TuiHarness, args: &[&str]) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nebula"))
+        .args(args)
+        .env(nebula_core::env::RUNTIME_DIR, &tui.runtime_dir)
+        .env(nebula_core::env::DATA_DIR, &tui.data_dir)
+        .env_remove(nebula_core::env::AGENT_ID)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "nebula {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// REMOTE HOSTS end to end: the local TUI shows the other machine's
+/// project as its own tab and types into its session, and the
+/// session-context commands reach it as `fakebox:<session>`.
+#[test]
+fn tui_shows_and_attaches_a_remote_hosts_session() {
+    let Some((_far, mut tui, _bin)) = remote_pair() else {
+        return;
+    };
+    click_tab(&mut tui, "far @fakebox");
     tui.wait_for_text("agent-1");
     tui.send(ENTER);
     tui.wait_for_text(FOOTER_TERMINAL_LOCKED);
     tui.type_str("echo far-$((40+2))\r");
     tui.wait_for_text("far-42");
 
-    // The session-context commands reach it as `fakebox:<session>`.
-    let cli = |args: &[&str]| {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_nebula"))
-            .args(args)
-            .env(nebula_core::env::RUNTIME_DIR, &tui.runtime_dir)
-            .env(nebula_core::env::DATA_DIR, &tui.data_dir)
-            .env_remove(nebula_core::env::AGENT_ID)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "nebula {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap()
-    };
-    let sessions = cli(&["sessions"]);
+    let sessions = cli(&tui, &["sessions"]);
     let far_line = sessions
         .lines()
         .find(|l| l.starts_with("fakebox:"))
@@ -1145,5 +1156,113 @@ exec sh -c "$*"
         far_line.contains("name=agent-1") && far_line.contains("project=far"),
         "{far_line}"
     );
-    assert!(cli(&["read", "fakebox:agent-1"]).contains("far-42"));
+    assert!(cli(&tui, &["read", "fakebox:agent-1"]).contains("far-42"));
+}
+
+/// A session started from the local TUI in the other machine's tab runs
+/// there: its card comes up here and the other machine lists it.
+#[test]
+fn tui_starts_a_session_on_a_remote_host() {
+    let Some((far, mut tui, _bin)) = remote_pair() else {
+        return;
+    };
+    click_tab(&mut tui, "far @fakebox");
+    tui.wait_for_text("agent-1");
+    tui.send(b"p");
+    tui.wait_for_text("what should the agent do?");
+    tui.type_str("more remote work");
+    tui.send(ENTER);
+    tui.wait_for_gone("what should the agent do?");
+    tui.wait_for_text("agent-2");
+    let theirs = cli(&far, &["sessions"]);
+    assert!(
+        theirs.contains("name=agent-2"),
+        "the far daemon has it:\n{theirs}"
+    );
+    let ours = cli(&tui, &["sessions"]);
+    assert!(
+        ours.lines()
+            .any(|l| l.starts_with("fakebox:") && l.contains("name=agent-2")),
+        "{ours}"
+    );
+    assert!(
+        !ours
+            .lines()
+            .any(|l| !l.starts_with("fakebox:") && l.contains("name=agent-2")),
+        "nothing started here:\n{ours}"
+    );
+
+    // Archiving it here archives it there.
+    tui.send(b"a");
+    tui.wait_for_text("Archive agent 'agent-2'?");
+    tui.send(b"y");
+    tui.wait_for_gone("Archive agent 'agent-2'?");
+    tui.wait_for("the far daemon to archive agent-2", |_| {
+        !cli(&far, &["sessions"]).contains("name=agent-2")
+    });
+}
+
+/// `nebula spawn --host` starts a session on the other machine: in the
+/// named project's root checkout, or in a worktree it cuts there.
+#[test]
+fn spawn_starts_a_session_on_a_remote_host() {
+    let Some((far, tui, _bin)) = remote_pair() else {
+        return;
+    };
+    let said = cli(
+        &tui,
+        &[
+            "spawn",
+            "--host",
+            "fakebox",
+            "--project",
+            "far",
+            "look around",
+        ],
+    );
+    assert!(said.contains("fakebox:agent-2"), "{said}");
+    cli(
+        &tui,
+        &[
+            "spawn",
+            "--host",
+            "fakebox",
+            "--project",
+            "far",
+            "--worktree",
+            "side",
+            "branch work",
+        ],
+    );
+    let theirs = cli(&far, &["sessions"]);
+    let line = |name: &str| {
+        theirs
+            .lines()
+            .find(|l| l.contains(&format!("name={name} ")))
+            .unwrap_or_else(|| panic!("no {name} on the far daemon:\n{theirs}"))
+            .to_owned()
+    };
+    assert!(line("agent-2").contains("branch=main"), "{theirs}");
+    assert!(line("agent-1").contains("branch=main"), "{theirs}");
+    assert!(
+        theirs
+            .lines()
+            .any(|l| l.contains("branch=side") && l.contains("name=agent-1")),
+        "a fresh worktree's first session:\n{theirs}"
+    );
+
+    // An unknown project says what there is.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nebula"))
+        .args(["spawn", "--host", "fakebox", "--project", "nope", "x"])
+        .env(nebula_core::env::RUNTIME_DIR, &tui.runtime_dir)
+        .env(nebula_core::env::DATA_DIR, &tui.data_dir)
+        .env_remove(nebula_core::env::AGENT_ID)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("it has: far"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

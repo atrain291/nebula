@@ -115,10 +115,22 @@ pub fn run_spawn(
     kind: Option<nebula_core::AgentKind>,
     worktree: Option<String>,
     base: Option<String>,
+    host: Option<String>,
+    project: Option<String>,
 ) -> Result<()> {
-    runtime()?.block_on(ipc::spawn_sibling_for_current_agent(
-        &task, kind, worktree, base,
-    ))
+    match host {
+        Some(host) => runtime()?.block_on(ipc::spawn_on_host(
+            &host,
+            project.as_deref(),
+            &task,
+            kind,
+            worktree,
+            base,
+        )),
+        None => runtime()?.block_on(ipc::spawn_sibling_for_current_agent(
+            &task, kind, worktree, base,
+        )),
+    }
 }
 
 pub fn run_sessions(json: bool) -> Result<()> {

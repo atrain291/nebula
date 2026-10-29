@@ -10,11 +10,12 @@
 //! the PROJECT TABS and the status alerts take them in like any other.
 //!
 //! Every request still leaves through the loop's one queue; [`route`]
-//! sends each to the daemon owning the rows it names. A remote session
-//! takes what viewing and typing into it needs — attach, input, resize,
-//! being marked seen, its card's tail. Anything else aimed at a remote row
-//! is refused here with an Error the loop lands like the daemon's own, so
-//! a rename or an archive shown on the keypress rolls back.
+//! sends each to the daemon owning the rows it names, so a remote session
+//! is attached, typed into, created, renamed, archived or deleted as a
+//! local one is. A request no one daemon can take — rows of two machines,
+//! or something built from this machine's own disk, `gh` or inbox aimed
+//! at a remote row — is refused here with an Error the loop lands like a
+//! daemon's own, so a change shown on the keypress rolls back.
 
 use crate::app::{entity_key, App, Tree, TreeRows};
 use nebula_core::codec::{read_frame, write_frame};
@@ -29,7 +30,7 @@ use tokio::sync::mpsc;
 pub const POLL: Duration = Duration::from_secs(5);
 
 /// What the refusal of a request aimed at a remote row says.
-pub const REFUSED: &str = "not available on remote hosts yet";
+pub const REFUSED: &str = "not available on remote hosts";
 
 /// News from a remote connection, tagged with its host.
 #[derive(Debug)]
@@ -181,48 +182,49 @@ async fn run(
 pub enum Route {
     Local,
     Host(String),
-    /// Aimed at a remote row it can't touch yet: answered with an Error
-    /// when it carries a `req_id`, dropped when it doesn't (background
-    /// work like a prewarm, which no one is waiting on).
+    /// Can't go to any one daemon: rows of two machines in one request, or
+    /// a request built from this machine's own state aimed at a remote row.
+    /// Answered with an Error when it carries a `req_id`, dropped when it
+    /// doesn't (background work no one is waiting on).
     Refuse(Option<u64>),
 }
 
-/// The daemon `req` is for: the owner of the rows it names.
+/// The daemon `req` is for: the one owning every row it names.
 pub fn route(tree: &Tree, req: &ClientRequest) -> Route {
     use ClientRequest as R;
-    let session = |sref: &SessionRef| tree.host_of_session(sref).map(str::to_owned);
-    let refuse_if = |req_id: Option<u64>, ids: &[&str]| {
-        if ids.iter().any(|id| tree.host_of(id).is_some()) {
-            Route::Refuse(req_id)
-        } else {
-            Route::Local
+    let owner = |req_id: Option<u64>, ids: &[&str]| {
+        let mut hosts = ids.iter().map(|id| tree.host_of(id));
+        let first = hosts.next().flatten();
+        if hosts.any(|h| h != first) {
+            return Route::Refuse(req_id);
         }
+        first.map_or(Route::Local, |h| Route::Host(h.to_owned()))
     };
-    let to = |host: Option<String>| host.map_or(Route::Local, Route::Host);
+    let local_only = |req_id: u64, id: &str| match tree.host_of(id) {
+        Some(_) => Route::Refuse(Some(req_id)),
+        None => Route::Local,
+    };
+    let sref = |s: &SessionRef| match s {
+        SessionRef::Agent(id) => id.0.clone(),
+        SessionRef::Terminal(id) => id.0.clone(),
+    };
     match req {
-        // What viewing and typing into a remote session needs.
-        R::Attach { session: s, .. }
-        | R::Detach { session: s }
-        | R::Input { session: s, .. }
-        | R::Resize { session: s, .. }
-        | R::TailOutput { session: s, .. } => to(session(s)),
-        R::MarkAgentSeen { id } => to(tree.host_of(id.as_str()).map(str::to_owned)),
-
-        // Work the grid starts on its own.
+        R::Attach { session, .. }
+        | R::Detach { session }
+        | R::Input { session, .. }
+        | R::Resize { session, .. }
+        | R::TailOutput { session, .. } => owner(None, &[&sref(session)]),
+        R::MarkAgentSeen { id } => owner(None, &[id.as_str()]),
         R::PrewarmAgent { worktree, .. } | R::PrewarmWorktreeSessions { worktree, .. } => {
-            refuse_if(None, &[worktree.as_str()])
+            owner(None, &[worktree.as_str()])
         }
 
-        // Everything a user does to a row.
-        R::RemoveProject { req_id, id }
-        | R::RenameProject { req_id, id, .. }
-        | R::SetProjectPath { req_id, id, .. } => refuse_if(Some(*req_id), &[id.as_str()]),
+        R::RemoveProject { req_id, id } | R::RenameProject { req_id, id, .. } => {
+            owner(Some(*req_id), &[id.as_str()])
+        }
         R::CreateWorktree {
             req_id, project, ..
-        }
-        | R::CreatePrAgent {
-            req_id, project, ..
-        } => refuse_if(Some(*req_id), &[project.as_str()]),
+        } => owner(Some(*req_id), &[project.as_str()]),
         R::DeleteWorktree { req_id, id, .. }
         | R::CheckWorktree { req_id, id }
         | R::CleanupMergedWorktree { req_id, id, .. }
@@ -243,7 +245,7 @@ pub fn route(tree: &Tree, req: &ClientRequest) -> Route {
         | R::StopRun {
             req_id,
             worktree: id,
-        } => refuse_if(Some(*req_id), &[id.as_str()]),
+        } => owner(Some(*req_id), &[id.as_str()]),
         R::RenameAgent { req_id, id, .. }
         | R::AutoRenameAgent { req_id, id, .. }
         | R::EnterWorktree { req_id, id, .. }
@@ -253,21 +255,27 @@ pub fn route(tree: &Tree, req: &ClientRequest) -> Route {
         | R::UnarchiveAgent { req_id, id }
         | R::DeleteAgent { req_id, id }
         | R::RestartAgent { req_id, id }
-        | R::SendCloudMessage { req_id, id, .. } => refuse_if(Some(*req_id), &[id.as_str()]),
+        | R::SendCloudMessage { req_id, id, .. } => owner(Some(*req_id), &[id.as_str()]),
+        // Within one machine only: a session can't move to another's.
         R::MoveAgent {
             req_id,
             id,
             worktree,
-        } => refuse_if(Some(*req_id), &[id.as_str(), worktree.as_str()]),
+        } => owner(Some(*req_id), &[id.as_str(), worktree.as_str()]),
         R::RenameTerminal { req_id, id, .. } | R::CloseTerminal { req_id, id } => {
-            refuse_if(Some(*req_id), &[id.as_str()])
+            owner(Some(*req_id), &[id.as_str()])
         }
         R::UpdateLink { req_id, id, .. } | R::DeleteLink { req_id, id } => {
-            refuse_if(Some(*req_id), &[id.as_str()])
+            owner(Some(*req_id), &[id.as_str()])
         }
-        R::LaunchInbox { req_id, draft, .. } => {
-            refuse_if(Some(*req_id), &[draft.worktree.as_str()])
-        }
+
+        // Built from this machine: a path picked from its disk, a pull
+        // request's checkout found with its `gh`, its daemon's inbox.
+        R::SetProjectPath { req_id, id, .. } => local_only(*req_id, id.as_str()),
+        R::CreatePrAgent {
+            req_id, project, ..
+        } => local_only(*req_id, project.as_str()),
+        R::LaunchInbox { req_id, draft, .. } => local_only(*req_id, draft.worktree.as_str()),
         _ => Route::Local,
     }
 }
@@ -361,9 +369,33 @@ fn land_event(app: &mut App, host: &str, event: ServerEvent, out: &mut Vec<Clien
         }
         ServerEvent::EntityRemoved { id } => {
             let key = entity_key(&id).to_owned();
+            let before = live_ids(&app.tree);
             handle_server_event(app, ServerEvent::EntityRemoved { id }, out);
             app.tree.remote.remove(&key);
-            prune_owners(&mut app.tree);
+            // The rows the removal cascaded away client-side.
+            let after = live_ids(&app.tree);
+            for gone in before.difference(&after) {
+                app.tree.remote.remove(gone);
+            }
+        }
+        // The Ack can beat the new row's upsert, which travels on the
+        // daemon's broadcast instead; whatever this machine queues for the
+        // new row in between must already know where it lives.
+        ServerEvent::Ack {
+            req_id,
+            created: Some(created),
+        } => {
+            app.tree
+                .remote
+                .insert(entity_key(&created).to_owned(), host.to_owned());
+            handle_server_event(
+                app,
+                ServerEvent::Ack {
+                    req_id,
+                    created: Some(created),
+                },
+                out,
+            );
         }
         // Status, the attached pane's bytes, request answers: the same as
         // the local daemon's. Req ids come from the one counter, so an
@@ -395,26 +427,16 @@ fn drop_host(app: &mut App, host: &str, out: &mut Vec<ClientRequest>) {
     app.chrome.dirty = true;
 }
 
-/// Owners of rows a removal cascaded away client-side.
-fn prune_owners(tree: &mut Tree) {
-    let live: HashSet<&str> = tree
-        .projects
+/// Every row id in the tree.
+fn live_ids(tree: &Tree) -> HashSet<String> {
+    tree.projects
         .iter()
-        .map(|p| p.id.as_str())
-        .chain(tree.worktrees.iter().map(|w| w.id.as_str()))
-        .chain(tree.agents.iter().map(|a| a.id.as_str()))
-        .chain(tree.terminals.iter().map(|t| t.id.as_str()))
-        .chain(tree.links.iter().map(|l| l.id.as_str()))
-        .collect();
-    let gone: Vec<String> = tree
-        .remote
-        .keys()
-        .filter(|id| !live.contains(id.as_str()))
-        .cloned()
-        .collect();
-    for id in gone {
-        tree.remote.remove(&id);
-    }
+        .map(|p| p.id.0.clone())
+        .chain(tree.worktrees.iter().map(|w| w.id.0.clone()))
+        .chain(tree.agents.iter().map(|a| a.id.0.clone()))
+        .chain(tree.terminals.iter().map(|t| t.id.0.clone()))
+        .chain(tree.links.iter().map(|l| l.id.0.clone()))
+        .collect()
 }
 
 /// For a key that would run git, `gh`, an editor or a file view in the
@@ -628,6 +650,44 @@ mod tests {
         );
     }
 
+    /// The Ack for a create can land before the new row does; whatever is
+    /// queued for that row in between must already go to its host.
+    #[test]
+    fn an_ack_tells_where_the_created_row_lives() {
+        let mut app = app();
+        land_event(
+            &mut app,
+            "desk",
+            ServerEvent::Ack {
+                req_id: 42,
+                created: Some(EntityId::Agent(AgentId("a5".into()))),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            route(
+                &app.tree,
+                &ClientRequest::Attach {
+                    session: SessionRef::Agent(AgentId("a5".into())),
+                    from_seq: None,
+                    cols: 80,
+                    rows: 24
+                }
+            ),
+            Route::Host("desk".into())
+        );
+        // An unrelated removal leaves that owner alone.
+        land_event(
+            &mut app,
+            "desk",
+            ServerEvent::EntityRemoved {
+                id: EntityId::Agent(AgentId("a9".into())),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(app.tree.host_of("a5"), Some("desk"));
+    }
+
     #[test]
     fn a_closed_connection_takes_its_rows() {
         let mut app = app();
@@ -678,13 +738,14 @@ mod tests {
             }),
             Route::Host("desk".into())
         );
+        // A remote row's own daemon takes the user's edits of it.
         assert_eq!(
             host(ClientRequest::RenameAgent {
                 req_id: 7,
                 id: AgentId("a9".into()),
                 name: "x".into()
             }),
-            Route::Refuse(Some(7))
+            Route::Host("desk".into())
         );
         assert_eq!(
             host(ClientRequest::PrewarmWorktreeSessions {
@@ -692,9 +753,17 @@ mod tests {
                 cols: 80,
                 rows: 24
             }),
-            Route::Refuse(None)
+            Route::Host("desk".into())
         );
-        // Moving a local session onto another machine is refused too.
+        assert_eq!(
+            host(ClientRequest::CreateTerminal {
+                req_id: 3,
+                worktree: WorktreeId("w9".into()),
+                name: None
+            }),
+            Route::Host("desk".into())
+        );
+        // Moving a session onto another machine is refused.
         assert_eq!(
             host(ClientRequest::MoveAgent {
                 req_id: 8,
@@ -702,6 +771,15 @@ mod tests {
                 worktree: WorktreeId("w9".into())
             }),
             Route::Refuse(Some(8))
+        );
+        // A path picked from this machine's disk means nothing there.
+        assert_eq!(
+            host(ClientRequest::SetProjectPath {
+                req_id: 4,
+                id: ProjectId("p9".into()),
+                path: "/tmp/x".into()
+            }),
+            Route::Refuse(Some(4))
         );
         assert_eq!(
             host(ClientRequest::RenameAgent {

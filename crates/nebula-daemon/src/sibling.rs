@@ -29,7 +29,9 @@ up in the sessions list on its own. When the user wants that separate new/parall
 own branch or worktree (\"start a new session on branch fix-login\", \"spin up an agent in a new \
 worktree to fix login\"), add `--worktree <branch>`: nebula starts it in the project's worktree on \
 that branch, creating it when there is none (`--base <ref>` picks a new branch's start point, only \
-when the user names one). Do not use `nebula spawn --worktree` for requests that ask this current \
+when the user names one). When the user wants it on another machine (\"start a session on my \
+desktop that …\"), add `--host <host>`, a host `nebula remotes` lists: nebula starts it there, in that \
+machine's checkout of this project (`--project <name>` names a different one). Do not use `nebula spawn --worktree` for requests that ask this current \
 session to \"do this in a new worktree\" or \"move to a worktree\"; follow the worktree guidance and \
 run `nebula worktree <name>` for those. This session is unaffected by a spawn either way: carry on \
 with whatever else the user asked, and if starting the session was the whole request, tell the user \

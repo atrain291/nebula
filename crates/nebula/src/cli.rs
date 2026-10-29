@@ -193,6 +193,14 @@ pub(crate) enum Command {
         /// Refused when the branch already exists.
         #[arg(long, value_name = "REF", requires = "worktree")]
         base: Option<String>,
+        /// Start it on this REMOTE HOST instead (one `nebula remotes`
+        /// lists), in the project there named like this session's.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        /// The project on `--host` to start in, by name, when it is not
+        /// named like this session's.
+        #[arg(long, value_name = "NAME", requires = "host")]
+        project: Option<String>,
     },
     /// Show files to the user inside this nebula.
     ///
@@ -557,7 +565,10 @@ Examples:
   nebula spawn --kind codex \"review the diff on this branch\"
   nebula spawn --worktree fix-login \"fix the login redirect\"
                                    start it in that branch's worktree, made if new
-  nebula spawn --worktree hotfix --base v0.21.0 \"backport the fix\"";
+  nebula spawn --worktree hotfix --base v0.21.0 \"backport the fix\"
+  nebula spawn --host desktop \"run the GPU benchmarks\"
+                                   on another machine, in its checkout of this project
+  nebula spawn --host desktop --project api --worktree perf \"profile the hot path\"";
 
 const OPEN_EXAMPLES: &str = "\
 Examples:

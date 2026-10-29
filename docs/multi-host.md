@@ -154,17 +154,23 @@ projects and sessions alongside this machine's:
 - **A host that drops takes its tabs' rows with it**; they come back when the link
   does.
 
-For now, remote sessions are for watching and typing. These are refused with "not
-available on remote hosts yet":
+- **Work with remote sessions as with local ones.** Starting a session from the box
+  (`p`) or the new-session picker, renaming, archiving, deleting, restarting, moving a
+  session between that machine's worktrees, new terminals, and creating or deleting its
+  worktrees all go to the daemon that owns them.
 
-- creating, renaming, archiving, deleting, restarting or moving a session, and
-  creating or deleting a worktree or terminal, on a remote host
+These are refused with "not available on remote hosts":
+
+- moving a session from one machine to another
 - the checkout tools that run on this machine: the git diff (`g`), file finder (`f`),
   grep (`F`), branch switcher (`b`), file tree, issues and pull requests, and opening
   the checkout in an editor or terminal. A remote checkout's path is on that machine,
   and a directory with the same path here is a different checkout.
+- what is built from this machine's own state: a project path picked from this disk, a
+  session for a pull request (found with this machine's `gh`), and launching a task from
+  this machine's inbox into a remote worktree
 
-To do those, open that machine's own nebula with `nebula ssh <host>`.
+For the checkout tools, open that machine's own nebula with `nebula ssh <host>`.
 
 ## Asking sessions on other machines
 
@@ -187,7 +193,17 @@ $ nebula ask desktop:research "which cache did you pick?"
 - A remote ask opens with `(asked by session "<name>" on <hostname>)`, because the
   remote daemon cannot look up a session of this machine.
 
-## Planned
+## Starting sessions on other machines
 
-- Create, rename and archive sessions on a remote host from here, and `nebula spawn` on
-  a remote host.
+```sh
+nebula spawn --host desktop "run the GPU benchmarks"
+nebula spawn --host desktop --project api --worktree perf "profile the hot path"
+```
+
+- Without `--project`, the session starts in the remote project with the same name as
+  the project of the session running the command. Outside a session, `--project` is
+  required.
+- It starts in that project's root checkout, or in the worktree on `--worktree`'s
+  branch, which is created there when it has none (`--base` as usual).
+- The harness defaults to the calling session's, as with a local spawn.
+- The new session lists as `<host>:agent-N` and opens on the task as its first prompt.

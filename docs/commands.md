@@ -73,14 +73,17 @@ nebula worktree [name] [--base <ref>]  # move the current session into a worktre
                           # a branch name meaning origin's fetched copy — main is origin/main —
                           # but is ignored when the branch already exists; without it the
                           # worktree_base_branch setting applies, else origin's default)
-nebula spawn <task> [--kind <claude|codex|cursor|pi|muse|grok|opencode|antigravity>] [--worktree <branch> [--base <ref>]]
+nebula spawn <task> [--kind <claude|codex|cursor|pi|muse|grok|opencode|antigravity>] [--worktree <branch> [--base <ref>]] [--host <host> [--project <name>]]
                           # start a new agent session beside the current one, in the same worktree,
                           # opening on <task> (agents run this when you ask for a new nebula session;
                           # --kind defaults to this session's harness; custom harnesses launch from
                           # the TUI picker and presets, not --kind); --worktree starts it in the
                           # project's worktree on <branch> instead, creating it when the branch has
                           # none (--base picks a new branch's start point and is refused when the
-                          # branch already exists), and leaves this session where it is
+                          # branch already exists), and leaves this session where it is.
+                          # --host <host> starts it on that REMOTE HOST instead, in its project
+                          # named like this session's (--project <name> picks another), at its
+                          # root checkout or --worktree's branch there; it lists as <host>:<name>
 nebula open <file>…       # show the files in this nebula's FILE TABS — a modal with one tab per
                           # file, the focused one previewed, Enter editing it (agents run this only
                           # when you ask to see a file, image, mockup or diagram; text files,

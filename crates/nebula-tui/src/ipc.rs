@@ -451,6 +451,173 @@ pub async fn spawn_sibling_for_current_agent(
     Ok(())
 }
 
+/// CLI: `nebula spawn --host <host> "<task>"`: a new session on a REMOTE
+/// HOST, through its link. The remote daemon knows no session of this
+/// machine, so there is no sibling to start beside: this finds the
+/// project there (`project`, else the one named like the caller's), the
+/// worktree (`worktree`'s branch, made when it has none, else the root),
+/// and sends an ordinary `CreateAgent` with the task as its first prompt.
+pub async fn spawn_on_host(
+    host: &str,
+    project: Option<&str>,
+    task: &str,
+    kind: Option<AgentKind>,
+    worktree: Option<String>,
+    base: Option<String>,
+) -> Result<()> {
+    let task = task.trim();
+    if task.is_empty() {
+        bail!("the task is empty — `nebula spawn \"<task>\"` needs the work the new session starts on");
+    }
+    let branch = match worktree.as_deref().map(crate::branch_name::slugify) {
+        Some(slug) if slug.is_empty() => {
+            bail!("the branch is empty — `nebula spawn --worktree <branch>` needs a branch name")
+        }
+        other => other,
+    };
+    let base = match base.as_deref().map(str::trim) {
+        Some("") => bail!("the base is empty — `--base <ref>` needs a branch, tag or commit"),
+        other => other.map(str::to_string),
+    };
+    let mut local = session_context_connection("spawn").await?;
+    // The caller, when this runs inside a session: its project names the
+    // default one there, and its harness the default kind.
+    let caller = match env::non_empty(env::AGENT_ID) {
+        Some(id) => fetch_sessions(&mut local)
+            .await?
+            .into_iter()
+            .find(|s| s.id == id),
+        None => None,
+    };
+    let hosts = remote_hosts_of(&mut local).await?;
+    let Some(status) = hosts.iter().find(|h| h.host == host) else {
+        bail!("{host} is not one of this machine's remote hosts — see `nebula remotes`");
+    };
+    let project_name = match (project, &caller) {
+        (Some(name), _) => name.to_string(),
+        (None, Some(caller)) => caller.project.clone(),
+        (None, None) => bail!("name the project there with `--project <name>`"),
+    };
+    let kind = kind
+        .or_else(|| caller.as_ref().and_then(|c| AgentKind::parse(&c.harness)))
+        .unwrap_or(AgentKind::Claude);
+
+    let mut conn = remote_session_connection(status, "spawn").await?;
+    write_frame(&mut conn.stream, &ClientRequest::Subscribe).await?;
+    let (projects, worktrees, agents) = loop {
+        match read_frame::<ServerEvent, _>(&mut conn.stream).await? {
+            Some(ServerEvent::Snapshot {
+                projects,
+                worktrees,
+                agents,
+                ..
+            }) => break (projects, worktrees, agents),
+            Some(_) => continue,
+            None => bail!("{CLOSED_BEFORE_REPLY}"),
+        }
+    };
+    let Some(target) = projects
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(&project_name))
+    else {
+        let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+        bail!(
+            "{host} has no project named \"{project_name}\" (it has: {}); pick one with `--project <name>`",
+            if names.is_empty() { "none".to_string() } else { names.join(", ") }
+        );
+    };
+    let in_project = || worktrees.iter().filter(|w| w.project_id == target.id);
+    let mut req_id = ONE_SHOT_REQ_ID;
+    let worktree_id = match &branch {
+        Some(branch) => match in_project().find(|w| &w.branch == branch) {
+            Some(w) => w.id.clone(),
+            None => {
+                write_frame(
+                    &mut conn.stream,
+                    &ClientRequest::CreateWorktree {
+                        req_id,
+                        project: target.id.clone(),
+                        branch: branch.clone(),
+                        base,
+                    },
+                )
+                .await?;
+                let created = await_created(&mut conn, req_id).await?;
+                req_id += 1;
+                match created {
+                    Some(nebula_core::EntityId::Worktree(id)) => id,
+                    _ => bail!("{host} made no worktree for \"{branch}\""),
+                }
+            }
+        },
+        None => match in_project()
+            .find(|w| w.is_main)
+            .or_else(|| in_project().next())
+        {
+            Some(w) => w.id.clone(),
+            None => bail!("\"{}\" on {host} has no checkout to start in", target.name),
+        },
+    };
+    let taken: Vec<&str> = agents
+        .iter()
+        .filter(|a| a.worktree_id == worktree_id)
+        .map(|a| a.name.as_str())
+        .collect();
+    let name = (1..)
+        .map(|n| format!("agent-{n}"))
+        .find(|candidate| !taken.contains(&candidate.as_str()))
+        .expect("an unbounded counter always finds a free name");
+    write_frame(
+        &mut conn.stream,
+        &ClientRequest::CreateAgent {
+            req_id,
+            worktree: worktree_id,
+            name: name.clone(),
+            kind,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            auto_title: true,
+            cloud_prompt: None,
+            starting_prompt: Some(task.to_string()),
+            issue_url: None,
+            role: nebula_core::AgentRole::Worker,
+        },
+    )
+    .await?;
+    await_created(&mut conn, req_id).await?;
+    let place = match &branch {
+        Some(branch) => format!("the worktree on branch \"{branch}\""),
+        None => "its root checkout".to_string(),
+    };
+    println!(
+        "started a new {} session ({host}:{name}) on {host}, in \"{}\" {place}; it is working \
+         on that task now and shows in the sessions list. This session is unaffected — carry on.",
+        kind.as_str(),
+        target.name,
+    );
+    Ok(())
+}
+
+/// Wait for `req_id`'s Ack and what it created; the daemon's Error is the
+/// failure.
+async fn await_created(
+    conn: &mut Connection,
+    req_id: u64,
+) -> Result<Option<nebula_core::EntityId>> {
+    loop {
+        match read_frame::<ServerEvent, _>(&mut conn.stream).await? {
+            Some(ServerEvent::Ack { req_id: r, created }) if r == req_id => return Ok(created),
+            Some(ServerEvent::Error {
+                req_id: Some(r),
+                message,
+            }) if r == req_id => bail!("{message}"),
+            Some(_) => continue,
+            None => bail!("{CLOSED_BEFORE_REPLY}"),
+        }
+    }
+}
+
 /// CLI: `nebula open <file>…` from inside an agent session — resolve the
 /// paths here, where the cwd is the agent's, and hand them to the daemon,
 /// which raises every attached TUI's FILE TABS on them. Never spawns a
