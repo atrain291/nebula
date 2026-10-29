@@ -166,8 +166,28 @@ available on remote hosts yet":
 
 To do those, open that machine's own nebula with `nebula ssh <host>`.
 
+## Asking sessions on other machines
+
+`nebula sessions`, `nebula read` and `nebula ask`, the commands agents use to consult
+each other, reach remote sessions too:
+
+```sh
+$ nebula sessions
+01JC8M… name="Fix Login" project=api branch=main …
+desktop:01JC9Q… name=research project=api branch=spike …
+$ nebula read desktop:research --lines 40
+$ nebula ask desktop:research "which cache did you pick?"
+```
+
+- A remote session's target is `<host>:<id or name>`. `--json` also gives each session
+  `host` (null for this machine) and `target`.
+- Only a prefix that is one of your `remote_hosts` counts as a host, so a local session
+  whose name contains a colon is still found.
+- A host whose link is down is named on stderr; the rest of the list still prints.
+- A remote ask opens with `(asked by session "<name>" on <hostname>)`, because the
+  remote daemon cannot look up a session of this machine.
+
 ## Planned
 
-- Create, rename and archive sessions on a remote host from here.
-- `nebula sessions`, `read` and `ask` accept `host:session`, and `spawn` can target a
-  remote host.
+- Create, rename and archive sessions on a remote host from here, and `nebula spawn` on
+  a remote host.

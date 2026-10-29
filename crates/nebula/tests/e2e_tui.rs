@@ -1119,4 +1119,31 @@ exec sh -c "$*"
     tui.wait_for_text(FOOTER_TERMINAL_LOCKED);
     tui.type_str("echo far-$((40+2))\r");
     tui.wait_for_text("far-42");
+
+    // The session-context commands reach it as `fakebox:<session>`.
+    let cli = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_nebula"))
+            .args(args)
+            .env(nebula_core::env::RUNTIME_DIR, &tui.runtime_dir)
+            .env(nebula_core::env::DATA_DIR, &tui.data_dir)
+            .env_remove(nebula_core::env::AGENT_ID)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "nebula {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let sessions = cli(&["sessions"]);
+    let far_line = sessions
+        .lines()
+        .find(|l| l.starts_with("fakebox:"))
+        .unwrap_or_else(|| panic!("no fakebox session in:\n{sessions}"));
+    assert!(
+        far_line.contains("name=agent-1") && far_line.contains("project=far"),
+        "{far_line}"
+    );
+    assert!(cli(&["read", "fakebox:agent-1"]).contains("far-42"));
 }

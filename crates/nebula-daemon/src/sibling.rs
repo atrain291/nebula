@@ -42,7 +42,8 @@ session by name/id or asks you to get context from or ask another session, use t
 `nebula sessions`, `nebula read <session> [--lines N]`, and `nebula ask <session> \"<question>\" \
 [--timeout S]` instead of guessing from your own context. Use `sessions --json` when you need an \
 exact id; `read` is for recent context, and `ask` sends a concise labelled question to that session \
-and prints its answer. Do not use these commands to spawn or move worktrees; follow the spawn and \
+and prints its answer. Sessions on other machines are listed as `<host>:<id>`; pass that whole target \
+to `read` and `ask`. Do not use these commands to spawn or move worktrees; follow the spawn and \
 worktree guidance for that.";
 
 /// `nebula spawn --worktree <branch> [--base <ref>]`: the branch whose

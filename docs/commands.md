@@ -89,14 +89,19 @@ nebula open <file>…       # show the files in this nebula's FILE TABS — a mo
 nebula sessions [--json]  # list every session across every project: id, name, project, worktree
                           # branch/path, harness, status and one-line recent summary. Agents run
                           # this when you name another session and they need an exact id.
+                          # Sessions on REMOTE HOSTS follow, listed as `<host>:<id>` (JSON adds
+                          # `host` and `target`); a host that can't answer is named on stderr
 nebula read <session> [--lines N]
                           # print clean recent context from another session, resolving by id or
                           # unambiguous fuzzy name. Claude transcript text is preferred; otherwise
-                          # the daemon strips ANSI from bounded PTY scrollback.
+                          # the daemon strips ANSI from bounded PTY scrollback. `<host>:<session>`
+                          # reads a session on that REMOTE HOST
 nebula ask <session> "<question>" [--timeout S] [--no-wait]
                           # send a labelled question into another local agent, wait for that turn
                           # to finish, and print the answer. A busy target is queued until idle by
-                          # default; --no-wait fails fast instead.
+                          # default; --no-wait fails fast instead. `<host>:<session>` asks a
+                          # session on that REMOTE HOST; the question says which session and
+                          # machine it came from, since that daemon can't look the caller up
 nebula archive <session>...
                           # archive agent sessions by id or name (an exact match, else a unique
                           # part of one; never a project or branch): the process stops, the row

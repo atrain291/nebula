@@ -536,40 +536,72 @@ async fn fetch_sessions(conn: &mut Connection) -> Result<Vec<SessionSummary>> {
 
 pub async fn list_sessions(json: bool) -> Result<()> {
     let mut conn = session_context_connection("sessions").await?;
-    let sessions = fetch_sessions(&mut conn).await?;
+    let mut listed: Vec<(Option<String>, SessionSummary)> = fetch_sessions(&mut conn)
+        .await?
+        .into_iter()
+        .map(|s| (None, s))
+        .collect();
+    // Every REMOTE HOST whose link is up, after this machine's own. One
+    // that can't answer is named on stderr and costs only its rows.
+    for host in remote_hosts_of(&mut conn).await? {
+        let fetched = async {
+            let mut remote = remote_session_connection(&host, "sessions").await?;
+            fetch_sessions(&mut remote).await
+        };
+        match fetched.await {
+            Ok(sessions) => {
+                listed.extend(sessions.into_iter().map(|s| (Some(host.host.clone()), s)))
+            }
+            Err(e) => eprintln!("nebula: skipping {}: {e:#}", host.host),
+        }
+    }
     if json {
+        let sessions: Vec<serde_json::Value> = listed
+            .iter()
+            .map(|(host, s)| session_json(host.as_deref(), s))
+            .collect::<Result<_>>()?;
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({ "sessions": sessions }))?
         );
     } else {
-        print_session_summaries(&sessions);
+        print_session_summaries(&listed);
     }
     Ok(())
 }
 
+/// One session for `nebula sessions --json`: the summary, plus `host` (null
+/// for this machine) and `target`, what `read` and `ask` take for it —
+/// `desktop:<id>` for a REMOTE HOST's.
+fn session_json(host: Option<&str>, session: &SessionSummary) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(session)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("host".into(), serde_json::json!(host));
+        obj.insert(
+            "target".into(),
+            serde_json::json!(session_target_name(host, &session.id)),
+        );
+    }
+    Ok(value)
+}
+
+fn session_target_name(host: Option<&str>, id: &str) -> String {
+    match host {
+        Some(host) => format!("{host}:{id}"),
+        None => id.to_owned(),
+    }
+}
+
 /// `nebula remotes`: the daemon's REMOTE HOST LINKS and how each is doing.
 pub async fn list_remote_hosts(json: bool) -> Result<()> {
-    use nebula_core::protocol::{RemoteHostStatus, REMOTE_HOSTS_PROTOCOL};
+    use nebula_core::protocol::REMOTE_HOSTS_PROTOCOL;
     let sock = paths::socket_path();
     let Ok(stream) = try_connect(&sock).await else {
         bail!("no nebula daemon is running");
     };
     let mut conn = handshake(stream).await?;
     require_protocol(&conn, REMOTE_HOSTS_PROTOCOL, "remotes")?;
-    let req_id = ONE_SHOT_REQ_ID;
-    write_frame(&mut conn.stream, &ClientRequest::ListRemoteHosts { req_id }).await?;
-    let hosts: Vec<RemoteHostStatus> = loop {
-        match read_frame::<ServerEvent, _>(&mut conn.stream).await? {
-            Some(ServerEvent::RemoteHosts { req_id: r, hosts }) if r == req_id => break hosts,
-            Some(ServerEvent::Error {
-                req_id: Some(r),
-                message,
-            }) if r == req_id => bail!("{message}"),
-            Some(_) => continue,
-            None => bail!("{CLOSED_BEFORE_REPLY}"),
-        }
-    };
+    let hosts = fetch_remote_hosts(&mut conn).await?;
     if json {
         println!(
             "{}",
@@ -587,6 +619,88 @@ pub async fn list_remote_hosts(json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The local daemon's REMOTE HOST LINKS, on a connection already known to
+/// speak `REMOTE_HOSTS_PROTOCOL`.
+async fn fetch_remote_hosts(
+    conn: &mut Connection,
+) -> Result<Vec<nebula_core::protocol::RemoteHostStatus>> {
+    let req_id = ONE_SHOT_REQ_ID;
+    write_frame(&mut conn.stream, &ClientRequest::ListRemoteHosts { req_id }).await?;
+    loop {
+        match read_frame::<ServerEvent, _>(&mut conn.stream).await? {
+            Some(ServerEvent::RemoteHosts { req_id: r, hosts }) if r == req_id => return Ok(hosts),
+            Some(ServerEvent::Error {
+                req_id: Some(r),
+                message,
+            }) if r == req_id => bail!("{message}"),
+            Some(_) => continue,
+            None => bail!("{CLOSED_BEFORE_REPLY}"),
+        }
+    }
+}
+
+/// The local daemon's links, or none when it is too old to have any.
+async fn remote_hosts_of(
+    conn: &mut Connection,
+) -> Result<Vec<nebula_core::protocol::RemoteHostStatus>> {
+    if conn.protocol_version < nebula_core::protocol::REMOTE_HOSTS_PROTOCOL {
+        return Ok(Vec::new());
+    }
+    fetch_remote_hosts(conn).await
+}
+
+/// A session target naming another machine: `desktop:research` is the
+/// session `research` on the REMOTE HOST `desktop`. Only a prefix that is
+/// one of `hosts` counts, so a session whose own name holds a colon is
+/// still found here.
+fn split_remote_target<'a, 'h>(
+    target: &'a str,
+    hosts: &'h [nebula_core::protocol::RemoteHostStatus],
+) -> Option<(&'h nebula_core::protocol::RemoteHostStatus, &'a str)> {
+    let (host, rest) = target.split_once(':')?;
+    let status = hosts.iter().find(|h| h.host == host)?;
+    (!rest.is_empty()).then_some((status, rest))
+}
+
+/// A session-context connection to `host`'s daemon, through its link.
+async fn remote_session_connection(
+    host: &nebula_core::protocol::RemoteHostStatus,
+    command: &str,
+) -> Result<Connection> {
+    use nebula_core::protocol::RemoteLinkState;
+    match &host.state {
+        RemoteLinkState::Connected { .. } => {}
+        RemoteLinkState::Connecting => {
+            bail!("{} is still connecting; try again shortly", host.host)
+        }
+        RemoteLinkState::Retrying { error, .. } => bail!("{} is unreachable: {error}", host.host),
+    }
+    let stream = try_connect(&host.socket)
+        .await
+        .with_context(|| format!("connect to {}'s daemon", host.host))?;
+    let conn = handshake(stream).await?;
+    require_protocol(&conn, SESSION_CONTEXT_PROTOCOL, command)?;
+    Ok(conn)
+}
+
+/// Where a `read` or `ask` target lives: a connection to its daemon, and
+/// the target as that daemon knows it. `local` is the connection to this
+/// machine's daemon, for its links and, for a local target, the request.
+async fn session_target(
+    mut local: Connection,
+    target: &str,
+    command: &str,
+) -> Result<(Connection, String, Option<String>)> {
+    let hosts = remote_hosts_of(&mut local).await?;
+    match split_remote_target(target, &hosts) {
+        Some((host, rest)) => {
+            let conn = remote_session_connection(host, command).await?;
+            Ok((conn, rest.to_owned(), Some(host.host.clone())))
+        }
+        None => Ok((local, target.to_owned(), None)),
+    }
 }
 
 fn remote_host_line(host: &nebula_core::protocol::RemoteHostStatus, now_ms: i64) -> String {
@@ -797,7 +911,8 @@ async fn unarchive_over(conn: &mut Connection, targets: &[String]) -> Result<()>
 }
 
 pub async fn read_session(session: &str, lines: u32) -> Result<()> {
-    let mut conn = session_context_connection("read").await?;
+    let local = session_context_connection("read").await?;
+    let (mut conn, session, _) = session_target(local, session, "read").await?;
     let req_id = ONE_SHOT_REQ_ID;
     write_frame(
         &mut conn.stream,
@@ -832,12 +947,29 @@ pub async fn ask_session(
     timeout_secs: u64,
     wait: bool,
 ) -> Result<()> {
-    let mut conn = session_context_connection("ask").await?;
+    let mut local = session_context_connection("ask").await?;
     let question = question.trim();
     if question.is_empty() {
         bail!("question is empty");
     }
     let caller = env::non_empty(env::AGENT_ID).map(AgentId);
+    // Another machine's daemon can't look the caller up, so the question
+    // says who is asking, and from where, itself.
+    let origin = match &caller {
+        Some(id) => fetch_sessions(&mut local)
+            .await
+            .ok()
+            .and_then(|all| all.into_iter().find(|s| s.id == id.as_str()))
+            .map(|s| s.name),
+        None => None,
+    };
+    let (mut conn, session, remote) = session_target(local, session, "ask").await?;
+    let question = match remote {
+        Some(_) => remote_question(origin.as_deref(), &nebula_core::host::hostname(), question),
+        None => question.to_string(),
+    };
+    let question = question.as_str();
+    let caller = if remote.is_some() { None } else { caller };
     let timeout_ms = timeout_secs.saturating_mul(1000);
     let req_id = ONE_SHOT_REQ_ID;
     write_frame(
@@ -870,11 +1002,21 @@ pub async fn ask_session(
     }
 }
 
-fn print_session_summaries(sessions: &[SessionSummary]) {
-    for session in sessions {
+/// A question bound for another machine's session, opening with who is
+/// asking: that daemon labels it "external nebula CLI", knowing no session
+/// of this machine's.
+fn remote_question(asker: Option<&str>, hostname: &str, question: &str) -> String {
+    match asker {
+        Some(name) => format!("(asked by session \"{name}\" on {hostname})\n{question}"),
+        None => format!("(asked from {hostname})\n{question}"),
+    }
+}
+
+fn print_session_summaries(sessions: &[(Option<String>, SessionSummary)]) {
+    for (host, session) in sessions {
         println!(
             "{} name={} project={} branch={} worktree={} harness={} status={}{} summary={}",
-            session.id,
+            session_target_name(host.as_deref(), &session.id),
             shell_word(&session.name),
             shell_word(&session.project),
             shell_word(&session.branch),
@@ -1501,6 +1643,53 @@ mod tests {
             alive: true,
             summary: String::new(),
         }
+    }
+
+    fn remote(host: &str) -> nebula_core::protocol::RemoteHostStatus {
+        nebula_core::protocol::RemoteHostStatus {
+            host: host.into(),
+            socket: format!("/run/{host}.sock").into(),
+            state: nebula_core::protocol::RemoteLinkState::Connecting,
+        }
+    }
+
+    #[test]
+    fn a_remote_target_needs_a_known_host_prefix() {
+        let hosts = [remote("desk"), remote("me@srv")];
+        let split = |t| split_remote_target(t, &hosts).map(|(h, rest)| (h.host.as_str(), rest));
+        assert_eq!(split("desk:research"), Some(("desk", "research")));
+        assert_eq!(split("me@srv:01ABC"), Some(("me@srv", "01ABC")));
+        // A rest with its own colon stays whole.
+        assert_eq!(split("desk:fix: login"), Some(("desk", "fix: login")));
+        // Not a host: the whole target is a local session's name.
+        assert_eq!(split("fix: login"), None);
+        assert_eq!(split("research"), None);
+        assert_eq!(split("desk:"), None);
+    }
+
+    #[test]
+    fn remote_sessions_list_under_a_host_qualified_target() {
+        let agent = SessionRef::Agent(AgentId("01A".into()));
+        let row = summary(agent, "01A", "agent-1", "nebula");
+        assert_eq!(session_target_name(None, "01A"), "01A");
+        assert_eq!(session_target_name(Some("desk"), "01A"), "desk:01A");
+        let json = session_json(Some("desk"), &row).unwrap();
+        assert_eq!(json["host"], "desk");
+        assert_eq!(json["target"], "desk:01A");
+        assert_eq!(json["id"], "01A", "the id stays the daemon's own");
+        assert!(session_json(None, &row).unwrap()["host"].is_null());
+    }
+
+    #[test]
+    fn a_remote_question_says_who_asks() {
+        assert_eq!(
+            remote_question(Some("Fix Login"), "omarchy", "which branch?"),
+            "(asked by session \"Fix Login\" on omarchy)\nwhich branch?"
+        );
+        assert_eq!(
+            remote_question(None, "omarchy", "which branch?"),
+            "(asked from omarchy)\nwhich branch?"
+        );
     }
 
     #[test]
