@@ -158,6 +158,9 @@ pub(crate) fn open(app: &mut App) {
 /// thread's `#42`, clicked — rather than the Worktrees cursor's. A URL
 /// the list does not hold starts on its first row.
 pub(crate) fn open_on(app: &mut App, url: Option<&str>) {
+    if crate::remote_hosts::refuse_local_view(app) {
+        return;
+    }
     let Some(project) = app.selected_project().cloned() else {
         app.chrome.flash = Some("pull requests: select a project first".into());
         return;

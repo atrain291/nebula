@@ -10,8 +10,8 @@ use std::path::PathBuf;
 ///
 /// Bump on every protocol change. Additive changes keep
 /// [`MIN_COMPATIBLE_PROTOCOL`] where it is; breaking changes bump both.
-// Manual inbox requests and replies (gated at INBOX_PROTOCOL).
-pub const PROTOCOL_VERSION: u32 = 54;
+// Remote host links (gated at REMOTE_HOSTS_PROTOCOL).
+pub const PROTOCOL_VERSION: u32 = 55;
 
 /// Oldest IPC protocol this build can safely talk to.
 ///
@@ -25,6 +25,10 @@ pub const MIN_COMPATIBLE_PROTOCOL: u32 = 54;
 /// a request it could not decode, and its delete confirm simply goes
 /// without the check.
 pub const CHECK_WORKTREE_PROTOCOL: u32 = 51;
+
+/// First protocol whose daemon answers `ClientRequest::ListRemoteHosts`.
+/// Additive: an older daemon is never sent the request.
+pub const REMOTE_HOSTS_PROTOCOL: u32 = 55;
 
 pub fn protocol_ranges_overlap(
     local_min: u32,
@@ -557,6 +561,11 @@ pub enum ClientRequest {
         expected_revision: i64,
         review: crate::InboxReview,
     },
+    /// The REMOTE HOST LINKS this daemon keeps, and how each one is doing.
+    /// Asked only of a daemon at [`REMOTE_HOSTS_PROTOCOL`] or newer.
+    ListRemoteHosts {
+        req_id: u64,
+    },
 }
 
 /// How much of a pull request's conversation the user had already seen the
@@ -877,6 +886,39 @@ pub enum ServerEvent {
         items: Vec<crate::InboxItem>,
         complete: bool,
     },
+    /// Reply to `ClientRequest::ListRemoteHosts`, in `remote_hosts` order.
+    RemoteHosts {
+        req_id: u64,
+        hosts: Vec<RemoteHostStatus>,
+    },
+}
+
+/// One REMOTE HOST LINK: an ssh destination from `remote_hosts`, the local
+/// socket its daemon is forwarded to, and the link's state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteHostStatus {
+    pub host: String,
+    /// Local end of the forward; a client connects here to reach the
+    /// remote daemon. Only answers while `state` is `Connected`.
+    pub socket: PathBuf,
+    pub state: RemoteLinkState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteLinkState {
+    /// Starting the remote daemon or the forward, or waiting for it to
+    /// answer the handshake.
+    Connecting,
+    /// The forward is up and the remote daemon answered.
+    Connected {
+        protocol_version: u32,
+        remote_socket: PathBuf,
+        /// `clock::now_ms` when the link came up.
+        since_ms: i64,
+    },
+    /// The last attempt failed; the next one starts at `retry_at_ms`.
+    Retrying { error: String, retry_at_ms: i64 },
 }
 
 #[cfg(test)]

@@ -1,0 +1,3 @@
+# REMOTE HOSTS: the far machine's project `api @fakebox` sits behind the local `demo` tab; `]` steps
+# onto it, showing its sessions on this grid and the link's state in the footer.
+]

@@ -193,6 +193,14 @@ pub(crate) enum Command {
         /// Refused when the branch already exists.
         #[arg(long, value_name = "REF", requires = "worktree")]
         base: Option<String>,
+        /// Start it on this REMOTE HOST instead (one `nebula remotes`
+        /// lists), in the project there named like this session's.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        /// The project on `--host` to start in, by name, when it is not
+        /// named like this session's.
+        #[arg(long, value_name = "NAME", requires = "host")]
+        project: Option<String>,
     },
     /// Show files to the user inside this nebula.
     ///
@@ -220,11 +228,32 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show the links this daemon keeps to other machines' daemons.
+    ///
+    /// Each ssh destination under `remote_hosts` in `config.local.json` gets
+    /// a link: the remote daemon is started if needed and its socket is
+    /// forwarded over ssh to a local one. Prints each host's state: up (with
+    /// its protocol version and local socket), connecting, or down with the
+    /// last error and when it retries.
+    #[command(after_help = REMOTES_EXAMPLES)]
+    Remotes {
+        /// Print JSON instead of compact text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start this machine's daemon if needed and print its socket path.
+    ///
+    /// Run over ssh by another machine's daemon opening a remote host link.
+    #[command(hide = true)]
+    RemoteEndpoint,
     /// Read another session's recent context.
     ///
     /// Resolves a session by id or unambiguous fuzzy name, then prints clean
     /// recent conversation text. Claude transcript text is preferred when
     /// available; otherwise nebula falls back to stripped PTY scrollback.
+    /// `<host>:<session>` reads a session on that remote host (`nebula
+    /// remotes`); a prefix that names one always means that host, even
+    /// when a session here is named that way.
     #[command(after_help = READ_EXAMPLES)]
     Read {
         /// Session id or unambiguous fuzzy name.
@@ -261,7 +290,8 @@ pub(crate) enum Command {
     /// Sends a labelled prompt into the target agent, waits for that turn to
     /// finish, and prints only the answer text captured from the target's
     /// output. If the target is busy, the default is to wait until it is idle
-    /// before sending; --no-wait fails fast instead.
+    /// before sending; --no-wait fails fast instead. `<host>:<session>` asks
+    /// a session on that remote host (`nebula remotes`).
     #[command(after_help = ASK_EXAMPLES)]
     Ask {
         /// Target agent id or unambiguous fuzzy name.
@@ -539,7 +569,10 @@ Examples:
   nebula spawn --kind codex \"review the diff on this branch\"
   nebula spawn --worktree fix-login \"fix the login redirect\"
                                    start it in that branch's worktree, made if new
-  nebula spawn --worktree hotfix --base v0.21.0 \"backport the fix\"";
+  nebula spawn --worktree hotfix --base v0.21.0 \"backport the fix\"
+  nebula spawn --host desktop \"run the GPU benchmarks\"
+                                   on another machine, in its checkout of this project
+  nebula spawn --host desktop --project api --worktree perf \"profile the hot path\"";
 
 const OPEN_EXAMPLES: &str = "\
 Examples:
@@ -551,6 +584,11 @@ const SESSIONS_EXAMPLES: &str = "\
 Examples:
   nebula sessions
   nebula sessions --json";
+
+const REMOTES_EXAMPLES: &str = "\
+Examples:
+  nebula remotes
+  nebula remotes --json";
 
 const READ_EXAMPLES: &str = "\
 Examples:

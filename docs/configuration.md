@@ -273,6 +273,22 @@ each exactly as the file has it, under a marker key:
   A bundle over 64 KiB is not sent (a real one is a few KiB), and the connection goes ahead without
   it.
 
+### Remote host links
+
+`remote_hosts` in `config.local.json` lists ssh destinations — `box`, `me@box`, an alias from
+`~/.ssh/config` — whose daemons this machine's daemon keeps linked over ssh:
+
+```json
+{ "remote_hosts": ["desktop", "me@server"] }
+```
+
+It is the one key read from `config.local.json` alone: in `config.json` it would travel with
+`nebula ssh`'s settings sync and have each remote open links of its own, back to this machine among
+them. The daemon rereads it every few seconds, so adding or removing a host needs no restart.
+Entries ssh would misread (empty, containing spaces, starting with `-`) are skipped and named in
+`daemon.log`. `nebula remotes` shows each link's state. See
+[Working across machines](multi-host.md).
+
 ### Compatibility rules
 
 Two nebula versions share these files all the time: a remote a few releases behind the machine that

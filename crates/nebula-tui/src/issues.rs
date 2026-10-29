@@ -653,6 +653,9 @@ pub(crate) fn open_issues(app: &mut App) {
         app.chrome.flash = Some("issues: select a project first".into());
         return;
     };
+    if crate::remote_hosts::refuse_remote(app, project.id.as_str()) {
+        return;
+    }
     let mut view = IssuesView::new(
         project.id.clone(),
         project.name.clone(),
@@ -729,6 +732,11 @@ pub(crate) fn reopen(app: &mut App, mut view: IssuesView) {
 /// sender installed (the unit tests) nothing is asked.
 fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
     if app.github.issues_inflight.contains(&project) {
+        return;
+    }
+    // A REMOTE HOST's repo is on that machine; a same-named path here is
+    // another checkout.
+    if app.tree.host_of(project.as_str()).is_some() {
         return;
     }
     if !dir.is_dir() {

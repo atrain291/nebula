@@ -42,6 +42,7 @@ pub mod preset_overlays;
 pub mod pull_request;
 pub mod quick_prompt;
 pub mod remote;
+pub mod remote_hosts;
 pub mod review;
 pub mod review_modal;
 pub mod splash;
@@ -114,14 +115,36 @@ pub fn run_spawn(
     kind: Option<nebula_core::AgentKind>,
     worktree: Option<String>,
     base: Option<String>,
+    host: Option<String>,
+    project: Option<String>,
 ) -> Result<()> {
-    runtime()?.block_on(ipc::spawn_sibling_for_current_agent(
-        &task, kind, worktree, base,
-    ))
+    match host {
+        Some(host) => runtime()?.block_on(ipc::spawn_on_host(
+            &host,
+            project.as_deref(),
+            &task,
+            kind,
+            worktree,
+            base,
+        )),
+        None => runtime()?.block_on(ipc::spawn_sibling_for_current_agent(
+            &task, kind, worktree, base,
+        )),
+    }
 }
 
 pub fn run_sessions(json: bool) -> Result<()> {
     runtime()?.block_on(ipc::list_sessions(json))
+}
+
+/// `nebula remotes` (see `ipc::list_remote_hosts`).
+pub fn run_remotes(json: bool) -> Result<()> {
+    runtime()?.block_on(ipc::list_remote_hosts(json))
+}
+
+/// `nebula remote-endpoint` (see `ipc::remote_endpoint`).
+pub fn run_remote_endpoint() -> Result<()> {
+    runtime()?.block_on(ipc::remote_endpoint())
 }
 
 pub fn run_read_session(session: &str, lines: u32) -> Result<()> {

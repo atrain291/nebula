@@ -28,6 +28,7 @@ nebula config <cmd>         back up, restore or locate this machine's settings
 nebula browser              serve this TUI in a web browser via ttyd
 nebula ssh <host>           open nebula on a remote host over ssh
 nebula tunnel <host>        open a remote host's nebula in a tab here
+nebula remotes              show this daemon's links to other machines' daemons
 nebula sbx [name]           open nebula inside a local Docker sandbox
 nebula upgrade              install the latest published nebula
 ```
@@ -72,14 +73,17 @@ nebula worktree [name] [--base <ref>]  # move the current session into a worktre
                           # a branch name meaning origin's fetched copy — main is origin/main —
                           # but is ignored when the branch already exists; without it the
                           # worktree_base_branch setting applies, else origin's default)
-nebula spawn <task> [--kind <claude|codex|cursor|pi|muse|grok|opencode|antigravity>] [--worktree <branch> [--base <ref>]]
+nebula spawn <task> [--kind <claude|codex|cursor|pi|muse|grok|opencode|antigravity>] [--worktree <branch> [--base <ref>]] [--host <host> [--project <name>]]
                           # start a new agent session beside the current one, in the same worktree,
                           # opening on <task> (agents run this when you ask for a new nebula session;
                           # --kind defaults to this session's harness; custom harnesses launch from
                           # the TUI picker and presets, not --kind); --worktree starts it in the
                           # project's worktree on <branch> instead, creating it when the branch has
                           # none (--base picks a new branch's start point and is refused when the
-                          # branch already exists), and leaves this session where it is
+                          # branch already exists), and leaves this session where it is.
+                          # --host <host> starts it on that REMOTE HOST instead, in its project
+                          # named like this session's (--project <name> picks another), at its
+                          # root checkout or --worktree's branch there; it lists as <host>:<name>
 nebula open <file>…       # show the files in this nebula's FILE TABS — a modal with one tab per
                           # file, the focused one previewed, Enter editing it (agents run this only
                           # when you ask to see a file, image, mockup or diagram; text files,
@@ -88,14 +92,19 @@ nebula open <file>…       # show the files in this nebula's FILE TABS — a mo
 nebula sessions [--json]  # list every session across every project: id, name, project, worktree
                           # branch/path, harness, status and one-line recent summary. Agents run
                           # this when you name another session and they need an exact id.
+                          # Sessions on REMOTE HOSTS follow, listed as `<host>:<id>` (JSON adds
+                          # `host` and `target`); a host that can't answer is named on stderr
 nebula read <session> [--lines N]
                           # print clean recent context from another session, resolving by id or
                           # unambiguous fuzzy name. Claude transcript text is preferred; otherwise
-                          # the daemon strips ANSI from bounded PTY scrollback.
+                          # the daemon strips ANSI from bounded PTY scrollback. `<host>:<session>`
+                          # reads a session on that REMOTE HOST
 nebula ask <session> "<question>" [--timeout S] [--no-wait]
                           # send a labelled question into another local agent, wait for that turn
                           # to finish, and print the answer. A busy target is queued until idle by
-                          # default; --no-wait fails fast instead.
+                          # default; --no-wait fails fast instead. `<host>:<session>` asks a
+                          # session on that REMOTE HOST; the question says which session and
+                          # machine it came from, since that daemon can't look the caller up
 nebula archive <session>...
                           # archive agent sessions by id or name (an exact match, else a unique
                           # part of one; never a project or branch): the process stops, the row
@@ -148,6 +157,12 @@ nebula tunnel <host> [dir] [--port N] [--remote-port N]
                           # `nebula browser`), --remote-port the far end when something there
                           # already holds that number. Settings ride along as they do for
                           # `nebula ssh` (--no-sync-config leaves them here)
+nebula remotes [--json]   # the REMOTE HOST LINKS this daemon keeps: one per ssh destination under
+                          # `remote_hosts` in config.local.json. Each line is the host and its
+                          # state: `connected` (the remote daemon's protocol version, how long the
+                          # link has been up, and the local socket it is forwarded to),
+                          # `connecting`, or `down` with the last error and the seconds until the
+                          # next try. See docs/multi-host.md
 nebula sbx [name] [--image IMAGE]
                           # nebula inside a local Docker container, so agents never see this
                           # machine's files: creates `nebula-sbx` (or `nebula-sbx-<name>`) from

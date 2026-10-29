@@ -95,6 +95,10 @@ macro_rules! main_loop_body {
     let update_interval = crate::update_check::interval();
     let mut next_update_check = tokio::time::Instant::now();
     let mut next_metrics_poll = tokio::time::Instant::now();
+    // REMOTE HOSTS: the connections to other machines' daemons, and when
+    // to next ask the local daemon which of its links are up.
+    let mut remotes = crate::remote_hosts::Conns::default();
+    let mut next_remotes_poll = tokio::time::Instant::now();
     let mut next_tail_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
     let mut next_sweep_frame = tokio::time::Instant::now();
@@ -328,13 +332,20 @@ macro_rules! main_loop_body {
                 }
                 Some(Err(_)) | None => app.chrome.should_quit = true,
             },
+            _ = tokio::time::sleep_until(next_remotes_poll) => {
+                crate::remote_hosts::request_status(&mut app, &mut out);
+                next_remotes_poll = tokio::time::Instant::now() + crate::remote_hosts::POLL;
+            }
+            Some(msg) = remotes.rx.recv() => {
+                crate::remote_hosts::land(&mut app, &mut remotes, msg, &mut out);
+            }
             ev = $channels.rx.recv() => match ev {
                 Some(server_event) => {
                     log_server_event(&server_event);
                     if let Some(perf) = &mut perf {
                         perf.server(crate::perf::server_name(&server_event));
                     }
-                    handle_server_event(&mut app, server_event, &mut out);
+                    handle_local_event(&mut app, &mut remotes, server_event, &mut out);
                 }
                 None => {
                     app.chrome.conn = ConnState::Disconnected;
@@ -454,7 +465,10 @@ macro_rules! main_loop_body {
             if let Some(perf) = &mut perf {
                 perf.server(crate::perf::server_name(&ev));
             }
-            handle_server_event(&mut app, ev, &mut out);
+            handle_local_event(&mut app, &mut remotes, ev, &mut out);
+        }
+        while let Ok(msg) = remotes.rx.try_recv() {
+            crate::remote_hosts::land(&mut app, &mut remotes, msg, &mut out);
         }
         while let Ok(ev) = vim_rx.try_recv() {
             handle_vim_event(&mut app, ev);
@@ -523,11 +537,34 @@ macro_rules! main_loop_body {
         // whichever key or menu opened it.
         crate::delete_check::sync(&mut app, &mut out);
 
+        // Each request to the daemon owning the rows it names (REMOTE
+        // HOSTS); one refused here comes back as that daemon's Error would.
+        let mut refused = Vec::new();
         for req in out.drain(..) {
-            if $channels.tx.send(req).await.is_err() {
-                app.chrome.conn = ConnState::Disconnected;
-                app.chrome.dirty = true;
+            match crate::remote_hosts::route(&app.tree, &req) {
+                crate::remote_hosts::Route::Local => {
+                    if $channels.tx.send(req).await.is_err() {
+                        app.chrome.conn = ConnState::Disconnected;
+                        app.chrome.dirty = true;
+                    }
+                }
+                crate::remote_hosts::Route::Host(host) => {
+                    if !remotes.send(&host, req) {
+                        tracing::debug!(%host, "no connection to remote host; request dropped");
+                    }
+                }
+                crate::remote_hosts::Route::Refuse(req_id) => refused.extend(req_id),
             }
+        }
+        for req_id in refused {
+            handle_server_event(
+                &mut app,
+                ServerEvent::Error {
+                    req_id: Some(req_id),
+                    message: crate::remote_hosts::REFUSED.into(),
+                },
+                &mut out,
+            );
         }
 
         if app.chrome.should_quit {
@@ -549,6 +586,22 @@ macro_rules! main_loop_body {
     }
 
     }};
+}
+
+/// An event from the local daemon: its answer about REMOTE HOST LINKS
+/// steers the remote connections; everything else is the usual handling.
+fn handle_local_event(
+    app: &mut App,
+    remotes: &mut crate::remote_hosts::Conns,
+    event: ServerEvent,
+    out: &mut Vec<ClientRequest>,
+) {
+    match event {
+        ServerEvent::RemoteHosts { req_id, hosts } => {
+            crate::remote_hosts::land_status(app, remotes, req_id, hosts, out)
+        }
+        event => handle_server_event(app, event, out),
+    }
 }
 
 pub(crate) async fn main_loop(

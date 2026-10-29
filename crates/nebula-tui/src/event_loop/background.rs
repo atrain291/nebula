@@ -11,6 +11,8 @@ pub(crate) fn request_git_changes(
     }
     let Some((id, path)) = app
         .selected_worktree()
+        // A REMOTE HOST's checkout is on that machine, not this one.
+        .filter(|w| !app.tree.is_remote_worktree(&w.id))
         .map(|w| (w.id.clone(), w.path.clone()))
     else {
         return;
@@ -151,7 +153,9 @@ pub(crate) fn changes_sweep_target(app: &App) -> Option<(WorktreeId, std::path::
     app.tree
         .worktrees
         .iter()
-        .filter(|w| held.contains(&w.id) && Some(&w.id) != selected)
+        .filter(|w| {
+            held.contains(&w.id) && Some(&w.id) != selected && !app.tree.is_remote_worktree(&w.id)
+        })
         .min_by_key(|w| app.jobs.worktree_changes.get(&w.id).map(|(_, at)| *at))
         .map(|w| (w.id.clone(), w.path.clone()))
 }
@@ -169,6 +173,8 @@ pub(crate) fn land_swept_changes(app: &mut App, worktree: WorktreeId, count: Opt
 pub(crate) fn refresh_git_changes(app: &mut App) {
     let Some((id, path)) = app
         .selected_worktree()
+        // A REMOTE HOST's checkout is on that machine, not this one.
+        .filter(|w| !app.tree.is_remote_worktree(&w.id))
         .map(|w| (w.id.clone(), w.path.clone()))
     else {
         return;
@@ -187,6 +193,8 @@ pub(crate) fn lookup_pull_request(
 ) {
     let Some((id, path)) = app
         .selected_worktree()
+        // A REMOTE HOST's checkout is on that machine, not this one.
+        .filter(|w| !app.tree.is_remote_worktree(&w.id))
         .map(|w| (w.id.clone(), w.path.clone()))
     else {
         return;
@@ -262,7 +270,9 @@ pub(crate) fn sweep_target(app: &mut App) -> Option<(WorktreeId, std::path::Path
     };
     let candidates: Vec<(WorktreeId, std::path::PathBuf)> = listed
         .iter()
-        .filter(|w| !w.is_main && Some(&w.id) != selected.as_ref())
+        .filter(|w| {
+            !w.is_main && Some(&w.id) != selected.as_ref() && !app.tree.is_remote_worktree(&w.id)
+        })
         .map(|w| (w.id.clone(), w.path.clone()))
         .collect();
     for (id, path) in candidates {
@@ -423,6 +433,7 @@ pub(crate) fn lookup_open_prs(
 ) {
     let Some((id, path)) = app
         .selected_project()
+        .filter(|p| app.tree.host_of(p.id.as_str()).is_none())
         .map(|p| (p.id.clone(), p.repo_path.clone()))
     else {
         return;
@@ -488,7 +499,9 @@ pub(crate) fn open_prs_sweep_target(app: &App) -> Option<(ProjectId, std::path::
         .into_iter()
         .map(|i| &app.tree.projects[i])
         .filter(|p| {
-            Some(&p.id) != selected.as_ref() && !app.github.open_prs_inflight.contains(&p.id)
+            Some(&p.id) != selected.as_ref()
+                && !app.github.open_prs_inflight.contains(&p.id)
+                && app.tree.host_of(p.id.as_str()).is_none()
         })
         .find(|p| match app.github.open_prs.get(&p.id) {
             Some(open) => now >= open.at + open.step.max(OPEN_PRS_SWEEP_REFRESH),

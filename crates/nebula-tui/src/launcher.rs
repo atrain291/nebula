@@ -1618,7 +1618,7 @@ pub fn project_cards(app: &App) -> Vec<ProjectCard> {
             let sessions = project_sessions(app, &p.id);
             ProjectCard {
                 id: p.id.clone(),
-                name: p.name.clone(),
+                name: app.tree.project_label(p),
                 status: crate::app::rollup(sessions.iter().map(|a| a.status)),
                 recency: crate::app::project_recency(&app.tree, &p.id, now),
                 sessions,
@@ -1732,7 +1732,7 @@ pub fn project_tabs(app: &App) -> Vec<ProjectTab> {
             let p = app.tree.projects.iter().find(|p| &p.id == id)?;
             Some(ProjectTab {
                 id: id.clone(),
-                name: p.name.clone(),
+                name: app.tree.project_label(p),
                 tally: project_tally(app, id),
                 active: active.as_ref() == Some(id),
                 focused: app.launcher.launcher_tab_cursor.as_ref() == Some(id),
@@ -2003,7 +2003,7 @@ impl ProjectPicker {
             .filter_map(|i| app.tree.projects.get(i))
             .map(|p| PickerProject {
                 id: p.id.clone(),
-                name: p.name.clone(),
+                name: app.tree.project_label(p),
                 path: home_relative(&p.repo_path),
             })
             .collect();

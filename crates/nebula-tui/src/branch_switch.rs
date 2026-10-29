@@ -1146,6 +1146,9 @@ fn recurrent(cached: &[Branch], branch: &str) -> Vec<Branch> {
 /// fetch when the last one is a minute old. A switch still running there
 /// shows as the working modal it was hidden from.
 pub(crate) fn open_for(app: &mut App, worktree: &WorktreeId) {
+    if crate::remote_hosts::refuse_remote(app, worktree.as_str()) {
+        return;
+    }
     let Some(w) = app
         .tree
         .worktrees

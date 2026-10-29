@@ -421,6 +421,11 @@ fn footer_left_context(app: &App, th: Theme) -> Vec<Span<'static>> {
         spans.push(Span::styled("✗ disconnected", Style::default().fg(th.err)));
         spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
     }
+    // REMOTE HOST LINKS, once any are configured: `desktop ✓  server ↻`.
+    if let Some(label) = crate::remote_hosts::footer_label(&app.chrome.remote_hosts) {
+        spans.push(Span::styled(label, Style::default().fg(th.muted)));
+        spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
+    }
     let crumbs = breadcrumb(app);
     if !crumbs.is_empty() {
         spans.extend(crumbs);

@@ -217,6 +217,11 @@ pub fn restart(daemon: &Arc<Daemon>, handles: &Handles, request: &Request) -> Re
     let err = match prepared {
         Ok(()) => {
             tracing::info!(exe = %exe.display(), sessions = live, "restarting in place");
+            // The exec keeps the runtime, so no `Child` is dropped: a
+            // REMOTE HOST LINK's ssh would outlive it, and the new image
+            // opens its own. Should the exec fail, the links see ssh exit
+            // and reconnect on their own.
+            daemon.remotes.kill_links();
             let mut args = vec!["daemon".to_string()];
             if handles.foreground {
                 args.push("--foreground".into());

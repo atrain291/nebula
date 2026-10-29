@@ -2865,7 +2865,8 @@ pub fn rollup(statuses: impl Iterator<Item = AgentStatus>) -> Option<AgentStatus
 }
 
 /// Client-side mirror of the entity tree: every project on this machine,
-/// with the checkouts, sessions, terminals and links under them.
+/// with the checkouts, sessions, terminals and links under them, and those
+/// of every REMOTE HOST the TUI is connected to (`remote_hosts.rs`).
 #[derive(Debug, Clone, Default)]
 pub struct Tree {
     pub projects: Vec<Project>,
@@ -2873,9 +2874,188 @@ pub struct Tree {
     pub agents: Vec<Agent>,
     pub terminals: Vec<TerminalTab>,
     pub links: Vec<Link>,
+    /// The rows another machine's daemon owns, by id, with that host's ssh
+    /// destination. A row not in here is the local daemon's. Ids are ULIDs,
+    /// so two daemons never hand out the same one.
+    pub remote: HashMap<String, String>,
+}
+
+/// Rows one daemon sent whole: a Snapshot's lists.
+pub struct TreeRows {
+    pub projects: Vec<Project>,
+    pub worktrees: Vec<Worktree>,
+    pub agents: Vec<Agent>,
+    pub terminals: Vec<TerminalTab>,
+    pub links: Vec<Link>,
+}
+
+impl TreeRows {
+    fn len(&self) -> usize {
+        self.projects.len()
+            + self.worktrees.len()
+            + self.agents.len()
+            + self.terminals.len()
+            + self.links.len()
+    }
+
+    fn ids(&self) -> impl Iterator<Item = &str> {
+        self.projects
+            .iter()
+            .map(|p| p.id.as_str())
+            .chain(self.worktrees.iter().map(|w| w.id.as_str()))
+            .chain(self.agents.iter().map(|a| a.id.as_str()))
+            .chain(self.terminals.iter().map(|t| t.id.as_str()))
+            .chain(self.links.iter().map(|l| l.id.as_str()))
+    }
+
+    /// Keep only the rows whose id passes `keep`.
+    fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.projects.retain(|p| keep(p.id.as_str()));
+        self.worktrees.retain(|w| keep(w.id.as_str()));
+        self.agents.retain(|a| keep(a.id.as_str()));
+        self.terminals.retain(|t| keep(t.id.as_str()));
+        self.links.retain(|l| keep(l.id.as_str()));
+    }
+}
+
+/// The raw id an [`EntityId`] wraps, as [`Tree::remote`] keys it.
+pub fn entity_key(id: &nebula_core::EntityId) -> &str {
+    use nebula_core::EntityId as E;
+    match id {
+        E::Project(id) => id.as_str(),
+        E::Worktree(id) => id.as_str(),
+        E::Agent(id) => id.as_str(),
+        E::Terminal(id) => id.as_str(),
+        E::Link(id) => id.as_str(),
+    }
 }
 
 impl Tree {
+    /// The REMOTE HOST owning the row with this id; None for a local row.
+    pub fn host_of(&self, id: &str) -> Option<&str> {
+        self.remote.get(id).map(String::as_str)
+    }
+
+    pub fn host_of_session(&self, sref: &SessionRef) -> Option<&str> {
+        match sref {
+            SessionRef::Agent(id) => self.host_of(id.as_str()),
+            SessionRef::Terminal(id) => self.host_of(id.as_str()),
+        }
+    }
+
+    /// Put one daemon's rows in place of what it sent before, leaving every
+    /// other daemon's alone: `host` None is the local daemon, whose rows
+    /// go first, the way a tree with no remotes has always been ordered.
+    ///
+    /// An id another daemon's row already has is never taken over: ULIDs
+    /// don't collide by chance, so the same id from a REMOTE HOST means the
+    /// same daemon answering twice — this machine listed in `remote_hosts`,
+    /// or one machine under two names — or a remote claiming rows that are
+    /// not its own. The remote's copy is dropped, and the local daemon's
+    /// always wins. Returns how many incoming rows were dropped.
+    pub fn replace_rows(&mut self, host: Option<&str>, mut rows: TreeRows) -> usize {
+        fn swap<T>(have: &mut Vec<T>, incoming: Vec<T>, first: bool, keep: impl Fn(&T) -> bool) {
+            let kept: Vec<T> = std::mem::take(have).into_iter().filter(keep).collect();
+            if first {
+                *have = incoming;
+                have.extend(kept);
+            } else {
+                *have = kept;
+                have.extend(incoming);
+            }
+        }
+        // Ids held by a daemon other than `host`.
+        let elsewhere: std::collections::HashSet<String> = match host {
+            None => std::collections::HashSet::new(),
+            Some(_) => self
+                .ids()
+                .filter(|id| self.host_of(id) != host)
+                .map(str::to_owned)
+                .collect(),
+        };
+        let before = rows.len();
+        rows.retain(|id| !elsewhere.contains(id));
+        let dropped = before - rows.len();
+        let incoming: std::collections::HashSet<String> = rows.ids().map(str::to_owned).collect();
+        let remote = &self.remote;
+        // Keep the other daemons' rows — but on a local resync, not a
+        // remote row wearing an id the local daemon now sends.
+        let keep = |id: &str| {
+            let owner = remote.get(id).map(String::as_str);
+            owner != host && !(host.is_none() && incoming.contains(id))
+        };
+        let first = host.is_none();
+        swap(&mut self.projects, rows.projects, first, |p| {
+            keep(p.id.as_str())
+        });
+        swap(&mut self.worktrees, rows.worktrees, first, |w| {
+            keep(w.id.as_str())
+        });
+        swap(&mut self.agents, rows.agents, first, |a| {
+            keep(a.id.as_str())
+        });
+        swap(&mut self.terminals, rows.terminals, first, |t| {
+            keep(t.id.as_str())
+        });
+        swap(&mut self.links, rows.links, first, |l| keep(l.id.as_str()));
+        match host {
+            Some(host) => {
+                self.remote.retain(|_, h| h != host);
+                self.remote
+                    .extend(incoming.into_iter().map(|id| (id, host.to_owned())));
+            }
+            None => self.remote.retain(|id, _| !incoming.contains(id)),
+        }
+        dropped
+    }
+
+    /// Every row id in the tree.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.projects
+            .iter()
+            .map(|p| p.id.as_str())
+            .chain(self.worktrees.iter().map(|w| w.id.as_str()))
+            .chain(self.agents.iter().map(|a| a.id.as_str()))
+            .chain(self.terminals.iter().map(|t| t.id.as_str()))
+            .chain(self.links.iter().map(|l| l.id.as_str()))
+    }
+
+    /// Does a daemon other than `host` already own a row with this id?
+    /// The test [`Tree::replace_rows`] applies, for one row at a time.
+    pub fn claimed_elsewhere(&self, id: &str, host: &str) -> bool {
+        self.host_of(id) != Some(host) && self.ids().any(|have| have == id)
+    }
+
+    /// A project's name as tabs and lists show it: `api @desktop` for one
+    /// a REMOTE HOST owns, so two machines' checkouts of one repo tell
+    /// apart.
+    pub fn project_label(&self, project: &Project) -> String {
+        match self.host_of(project.id.as_str()) {
+            Some(host) => format!("{} @{host}", project.name),
+            None => project.name.clone(),
+        }
+    }
+
+    /// Does a REMOTE HOST own this checkout? Its path is on that machine,
+    /// so nothing here may run git, `gh` or an editor in it.
+    pub fn is_remote_worktree(&self, id: &WorktreeId) -> bool {
+        self.host_of(id.as_str()).is_some()
+    }
+
+    /// A REMOTE HOST went away: its rows go with it.
+    pub fn drop_host(&mut self, host: &str) {
+        self.replace_rows(
+            Some(host),
+            TreeRows {
+                projects: Vec::new(),
+                worktrees: Vec::new(),
+                agents: Vec::new(),
+                terminals: Vec::new(),
+                links: Vec::new(),
+            },
+        );
+    }
+
     /// Any project at all? None is a first run: the splash, with the way
     /// to open one, is all there is to draw.
     pub fn has_projects(&self) -> bool {
@@ -3865,6 +4045,12 @@ pub struct ChromeState {
     /// the tree but must not replay persisted UI state over what the user is
     /// doing now.
     pub snapshot_loaded: bool,
+    /// The local daemon's REMOTE HOST LINKS as it last reported them, for
+    /// the footer (`remote_hosts::footer_label`).
+    pub remote_hosts: Vec<nebula_core::protocol::RemoteHostStatus>,
+    /// Hosts whose projects already got PROJECT TABS this run
+    /// (`remote_hosts::land`).
+    pub remote_tabs_opened: std::collections::HashSet<String>,
     pub hits: Vec<(Rect, HitTarget)>,
     /// Body rect (everything above the footer) from the last draw; bounds
     /// splitter drags.
@@ -3964,6 +4150,8 @@ impl Default for ChromeState {
         Self {
             conn: ConnState::Disconnected,
             snapshot_loaded: false,
+            remote_hosts: Vec::new(),
+            remote_tabs_opened: std::collections::HashSet::new(),
             hits: Vec::new(),
             body_area: Rect::default(),
             hostname: nebula_core::host::hostname(),

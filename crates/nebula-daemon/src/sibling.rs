@@ -29,7 +29,9 @@ up in the sessions list on its own. When the user wants that separate new/parall
 own branch or worktree (\"start a new session on branch fix-login\", \"spin up an agent in a new \
 worktree to fix login\"), add `--worktree <branch>`: nebula starts it in the project's worktree on \
 that branch, creating it when there is none (`--base <ref>` picks a new branch's start point, only \
-when the user names one). Do not use `nebula spawn --worktree` for requests that ask this current \
+when the user names one). When the user wants it on another machine (\"start a session on my \
+desktop that …\"), add `--host <host>`, a host `nebula remotes` lists: nebula starts it there, in that \
+machine's checkout of this project (`--project <name>` names a different one). Do not use `nebula spawn --worktree` for requests that ask this current \
 session to \"do this in a new worktree\" or \"move to a worktree\"; follow the worktree guidance and \
 run `nebula worktree <name>` for those. This session is unaffected by a spawn either way: carry on \
 with whatever else the user asked, and if starting the session was the whole request, tell the user \
@@ -42,7 +44,8 @@ session by name/id or asks you to get context from or ask another session, use t
 `nebula sessions`, `nebula read <session> [--lines N]`, and `nebula ask <session> \"<question>\" \
 [--timeout S]` instead of guessing from your own context. Use `sessions --json` when you need an \
 exact id; `read` is for recent context, and `ask` sends a concise labelled question to that session \
-and prints its answer. Do not use these commands to spawn or move worktrees; follow the spawn and \
+and prints its answer. Sessions on other machines are listed as `<host>:<id>`; pass that whole target \
+to `read` and `ask`. Do not use these commands to spawn or move worktrees; follow the spawn and \
 worktree guidance for that.";
 
 /// `nebula spawn --worktree <branch> [--base <ref>]`: the branch whose

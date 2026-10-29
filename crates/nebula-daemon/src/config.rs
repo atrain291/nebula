@@ -128,6 +128,50 @@ impl Config {
     }
 }
 
+/// The REMOTE HOST LINKS' ssh destinations (`box`, `me@box`, a
+/// `~/.ssh/config` alias), and the `remote_hosts` entries left out of them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RemoteHosts {
+    /// Trimmed and deduplicated, in the order the file lists them.
+    pub hosts: Vec<String>,
+    /// Entries ssh would misread, as written: not a string, empty, holding
+    /// whitespace or control characters, or starting with `-` (an option,
+    /// not a destination).
+    pub ignored: Vec<String>,
+}
+
+/// `remote_hosts` from `config.local.json` alone, unlike every other key:
+/// `config.json` is what `nebula ssh` and an export carry to other
+/// machines, and a host list there would have each remote it reaches open
+/// links of its own, back to this one among them.
+pub fn remote_hosts() -> RemoteHosts {
+    remote_hosts_in(&nebula_core::paths::config_local_path())
+}
+
+fn remote_hosts_in(local: &Path) -> RemoteHosts {
+    let mut out = RemoteHosts::default();
+    let entries = nebula_core::settings::read_object(local)
+        .ok()
+        .flatten()
+        .and_then(|mut obj| obj.remove("remote_hosts"));
+    let Some(serde_json::Value::Array(entries)) = entries else {
+        return out;
+    };
+    for entry in entries {
+        let host = entry.as_str().map(str::trim).filter(|host| {
+            !host.is_empty()
+                && !host.starts_with('-')
+                && !host.chars().any(|c| c.is_whitespace() || c.is_control())
+        });
+        match host {
+            Some(host) if out.hosts.iter().any(|h| h == host) => {}
+            Some(host) => out.hosts.push(host.to_owned()),
+            None => out.ignored.push(entry.to_string()),
+        }
+    }
+    out
+}
+
 /// "off"/"0" → Some(None); "<n>s"/"<n>m"/"<n>h" → Some(Some(d));
 /// malformed → None (caller falls back to the default).
 #[allow(clippy::option_option)]
@@ -169,6 +213,24 @@ mod tests {
         assert_eq!(cfg.session_idle_timeout, "1h");
         assert!(!cfg.prewarm_sessions);
         assert_eq!(skipped.len(), 1);
+    }
+
+    #[test]
+    fn remote_hosts_drop_what_ssh_would_misread() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("config.local.json");
+        assert_eq!(remote_hosts_in(&local), RemoteHosts::default());
+        std::fs::write(
+            &local,
+            r#"{"remote_hosts":[" box ","me@box","box","","-oProxyCommand=x","a b",7,"alias"]}"#,
+        )
+        .unwrap();
+        let read = remote_hosts_in(&local);
+        assert_eq!(read.hosts, ["box", "me@box", "alias"]);
+        assert_eq!(
+            read.ignored,
+            [r#""""#, r#""-oProxyCommand=x""#, r#""a b""#, "7"]
+        );
     }
 
     /// The daemon's half of the TUI's fixture test: every daemon key an
