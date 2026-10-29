@@ -124,6 +124,16 @@ pub fn run_sessions(json: bool) -> Result<()> {
     runtime()?.block_on(ipc::list_sessions(json))
 }
 
+/// `nebula remotes` (see `ipc::list_remote_hosts`).
+pub fn run_remotes(json: bool) -> Result<()> {
+    runtime()?.block_on(ipc::list_remote_hosts(json))
+}
+
+/// `nebula remote-endpoint` (see `ipc::remote_endpoint`).
+pub fn run_remote_endpoint() -> Result<()> {
+    runtime()?.block_on(ipc::remote_endpoint())
+}
+
 pub fn run_read_session(session: &str, lines: u32) -> Result<()> {
     runtime()?.block_on(ipc::read_session(session, lines))
 }

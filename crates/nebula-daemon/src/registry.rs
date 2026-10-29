@@ -239,6 +239,8 @@ pub struct Daemon {
     /// — so an attach replays how the run ended instead of running it
     /// again. Dropped when the run starts again, is stopped, or its row goes.
     finished_runs: Mutex<HashMap<TerminalId, FinishedRun>>,
+    /// REMOTE HOST LINKS' states, kept by `remote::supervise`.
+    pub remotes: Arc<crate::remote::Remotes>,
 }
 
 mod exit;
@@ -272,6 +274,7 @@ impl Daemon {
             pending_moves: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
             inbox_ops: tokio::sync::Mutex::new(()),
+            remotes: Arc::default(),
             prewarm_sweep: Mutex::new(None),
             resumes: Mutex::new(HashMap::new()),
             finished_runs: Mutex::new(HashMap::new()),

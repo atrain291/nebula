@@ -57,6 +57,8 @@ fn main() -> Result<()> {
         }) => nebula_tui::run_spawn(task.join(" "), kind, worktree, base),
         Some(Command::Open { files }) => nebula_tui::run_open(files),
         Some(Command::Sessions { json }) => nebula_tui::run_sessions(json),
+        Some(Command::Remotes { json }) => nebula_tui::run_remotes(json),
+        Some(Command::RemoteEndpoint) => nebula_tui::run_remote_endpoint(),
         Some(Command::Read { session, lines }) => nebula_tui::run_read_session(&session, lines),
         Some(Command::Archive { sessions }) => nebula_tui::run_archive(&sessions),
         Some(Command::Unarchive { sessions }) => nebula_tui::run_unarchive(&sessions),

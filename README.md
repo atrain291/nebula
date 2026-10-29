@@ -299,7 +299,7 @@ never travel with it: each machine runs only the programs its own files name. Fu
 | | |
 |---|---|
 | [**Keys**](docs/keys.md) | Every default binding, the grid's own keys (tabs, bands, cards, the pane), the WORKTREE views (`g` `f` `F` `b` `i` `v`), the chips and readouts, and the mouse. All of it rebindable. |
-| [**Commands**](docs/commands.md) | The `nebula` CLI: `add`, `rename`, `worktree`, `spawn`, `open`, `config`, `ssh`, `tunnel`, `browser`, `daemon`, `kill`, `upgrade`. |
+| [**Commands**](docs/commands.md) | The `nebula` CLI: `add`, `rename`, `worktree`, `spawn`, `open`, `config`, `ssh`, `tunnel`, `remotes`, `browser`, `daemon`, `kill`, `upgrade`. |
 | [**Sessions**](docs/sessions.md) | The QUICK PROMPT and the GRID, the NEW SESSION PICKER, MODEL / EFFORT, Claude Cloud and the CLOUD SESSION PANEL, AGENT PRESETS, the FOLLOW-UP COMPOSER, RECENT PROMPTS, the ISSUES MODAL, the PULL REQUESTS MODAL. |
 | [**Orchestrator**](docs/orchestrator.md) | The chat-first orchestrator session, privileged commands, status strip, review modal and mobile default. |
 | [**Working across machines**](docs/multi-host.md) | Agents on several machines sharing one Agent Mail server, setting up a new machine for each agent CLI, what is and is not shared, and the planned multi-host TUI. |

@@ -220,6 +220,24 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show the links this daemon keeps to other machines' daemons.
+    ///
+    /// Each ssh destination under `remote_hosts` in `config.local.json` gets
+    /// a link: the remote daemon is started if needed and its socket is
+    /// forwarded over ssh to a local one. Prints each host's state: up (with
+    /// its protocol version and local socket), connecting, or down with the
+    /// last error and when it retries.
+    #[command(after_help = REMOTES_EXAMPLES)]
+    Remotes {
+        /// Print JSON instead of compact text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start this machine's daemon if needed and print its socket path.
+    ///
+    /// Run over ssh by another machine's daemon opening a remote host link.
+    #[command(hide = true)]
+    RemoteEndpoint,
     /// Read another session's recent context.
     ///
     /// Resolves a session by id or unambiguous fuzzy name, then prints clean
@@ -551,6 +569,11 @@ const SESSIONS_EXAMPLES: &str = "\
 Examples:
   nebula sessions
   nebula sessions --json";
+
+const REMOTES_EXAMPLES: &str = "\
+Examples:
+  nebula remotes
+  nebula remotes --json";
 
 const READ_EXAMPLES: &str = "\
 Examples:

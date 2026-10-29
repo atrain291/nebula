@@ -539,6 +539,12 @@ impl ClientConnection {
                 reply_done(&self.out_tx, req_id, result).await;
                 Ok(true)
             }
+            ClientRequest::ListRemoteHosts { req_id } => {
+                let order = crate::config::remote_hosts().hosts;
+                let hosts = self.daemon.remotes.snapshot(&order);
+                self.send(ServerEvent::RemoteHosts { req_id, hosts }).await;
+                Ok(true)
+            }
             ClientRequest::ListSessions { req_id } => {
                 let result = self
                     .blocking_daemon(move |daemon| daemon.session_summaries())

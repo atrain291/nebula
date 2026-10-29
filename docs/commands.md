@@ -28,6 +28,7 @@ nebula config <cmd>         back up, restore or locate this machine's settings
 nebula browser              serve this TUI in a web browser via ttyd
 nebula ssh <host>           open nebula on a remote host over ssh
 nebula tunnel <host>        open a remote host's nebula in a tab here
+nebula remotes              show this daemon's links to other machines' daemons
 nebula sbx [name]           open nebula inside a local Docker sandbox
 nebula upgrade              install the latest published nebula
 ```
@@ -148,6 +149,12 @@ nebula tunnel <host> [dir] [--port N] [--remote-port N]
                           # `nebula browser`), --remote-port the far end when something there
                           # already holds that number. Settings ride along as they do for
                           # `nebula ssh` (--no-sync-config leaves them here)
+nebula remotes [--json]   # the REMOTE HOST LINKS this daemon keeps: one per ssh destination under
+                          # `remote_hosts` in config.local.json. Each line is the host and its
+                          # state: `connected` (the remote daemon's protocol version, how long the
+                          # link has been up, and the local socket it is forwarded to),
+                          # `connecting`, or `down` with the last error and the seconds until the
+                          # next try. See docs/multi-host.md
 nebula sbx [name] [--image IMAGE]
                           # nebula inside a local Docker container, so agents never see this
                           # machine's files: creates `nebula-sbx` (or `nebula-sbx-<name>`) from

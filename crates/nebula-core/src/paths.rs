@@ -52,6 +52,31 @@ pub fn socket_path() -> PathBuf {
     runtime_dir().join("daemon.sock")
 }
 
+/// Where the daemon's REMOTE HOST LINKS put each forwarded remote daemon
+/// socket. Inside the runtime dir, so its 0700 is the auth boundary here
+/// too.
+pub fn remotes_dir() -> PathBuf {
+    runtime_dir().join("remotes")
+}
+
+/// The local end of `host`'s forward: the destination with every byte
+/// outside `[A-Za-z0-9._@-]` turned into `_`, cut to 64 bytes so the path
+/// stays inside a unix socket's ~104-byte limit.
+pub fn remote_socket_path(host: &str) -> PathBuf {
+    let safe: String = host
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    remotes_dir().join(format!("{safe}.sock"))
+}
+
 pub fn pidfile_path() -> PathBuf {
     runtime_dir().join("daemon.pid")
 }
@@ -177,6 +202,22 @@ mod tests {
                 None => std::env::remove_var(self.0),
             }
         }
+    }
+
+    /// File names only: the dir comes from the process-global runtime dir,
+    /// which another test may be overriding.
+    #[test]
+    fn remote_sockets_are_named_after_the_host_safely() {
+        let name = |host: &str| {
+            remote_socket_path(host)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(name("me@box.lan"), "me@box.lan.sock");
+        assert_eq!(name("../x/y"), ".._x_y.sock");
+        assert_eq!(name(&"h".repeat(200)).len(), 64 + ".sock".len());
     }
 
     // One test owns both override vars: env is process-global, and splitting

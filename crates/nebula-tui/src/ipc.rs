@@ -548,6 +548,89 @@ pub async fn list_sessions(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `nebula remotes`: the daemon's REMOTE HOST LINKS and how each is doing.
+pub async fn list_remote_hosts(json: bool) -> Result<()> {
+    use nebula_core::protocol::{RemoteHostStatus, REMOTE_HOSTS_PROTOCOL};
+    let sock = paths::socket_path();
+    let Ok(stream) = try_connect(&sock).await else {
+        bail!("no nebula daemon is running");
+    };
+    let mut conn = handshake(stream).await?;
+    require_protocol(&conn, REMOTE_HOSTS_PROTOCOL, "remotes")?;
+    let req_id = ONE_SHOT_REQ_ID;
+    write_frame(&mut conn.stream, &ClientRequest::ListRemoteHosts { req_id }).await?;
+    let hosts: Vec<RemoteHostStatus> = loop {
+        match read_frame::<ServerEvent, _>(&mut conn.stream).await? {
+            Some(ServerEvent::RemoteHosts { req_id: r, hosts }) if r == req_id => break hosts,
+            Some(ServerEvent::Error {
+                req_id: Some(r),
+                message,
+            }) if r == req_id => bail!("{message}"),
+            Some(_) => continue,
+            None => bail!("{CLOSED_BEFORE_REPLY}"),
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "hosts": hosts }))?
+        );
+    } else if hosts.is_empty() {
+        println!(
+            "no remote hosts; list ssh destinations under \"remote_hosts\" in {}",
+            paths::config_local_path().display()
+        );
+    } else {
+        let now = nebula_core::clock::now_ms();
+        for host in &hosts {
+            println!("{}", remote_host_line(host, now));
+        }
+    }
+    Ok(())
+}
+
+fn remote_host_line(host: &nebula_core::protocol::RemoteHostStatus, now_ms: i64) -> String {
+    use nebula_core::protocol::RemoteLinkState;
+    let state = match &host.state {
+        RemoteLinkState::Connecting => "connecting".to_owned(),
+        RemoteLinkState::Connected {
+            protocol_version,
+            since_ms,
+            ..
+        } => {
+            let since = crate::hosts::ago_label(now_ms - since_ms);
+            let since = since.strip_suffix(" ago").unwrap_or(&since);
+            format!(
+                "connected v{protocol_version} since={} socket={}",
+                shell_word(since),
+                host.socket.display()
+            )
+        }
+        RemoteLinkState::Retrying { error, retry_at_ms } => format!(
+            "down retry_in={}s error={}",
+            ((retry_at_ms - now_ms).max(0) + 999) / 1000,
+            shell_word(error)
+        ),
+    };
+    format!("{} {state}", shell_word(&host.host))
+}
+
+/// `nebula remote-endpoint`, run over ssh by another machine's daemon
+/// opening a REMOTE HOST LINK to this one: start this machine's daemon when
+/// none is running, then print the socket it listens on.
+pub async fn remote_endpoint() -> Result<()> {
+    let sock = paths::socket_path();
+    if let Err(e) = connect_or_spawn().await {
+        // A daemon on another protocol is still listening; the linking
+        // daemon's own handshake names the skew better than this can.
+        if try_connect(&sock).await.is_err() {
+            return Err(e);
+        }
+    }
+    println!("{}", sock.display());
+    Ok(())
+}
+
 /// `nebula archive <session>...`: archive agent sessions by id or name,
 /// as `a` does in the TUI (the PTY is killed, the row is kept and `u`
 /// brings it back). Every target resolves before any is archived, so a

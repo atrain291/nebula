@@ -13,6 +13,7 @@ pub mod pr_scope;
 pub mod prompt_history;
 pub mod pty;
 pub mod registry;
+pub mod remote;
 pub mod server;
 pub mod session_context;
 pub mod session_model;
@@ -338,6 +339,9 @@ async fn serve(opts: DaemonOpts) -> Result<()> {
             }
         });
     }
+
+    // REMOTE HOST LINKS: one ssh forward per `remote_hosts` entry.
+    tokio::spawn(remote::supervise(daemon.clone()));
 
     // Keep the pidfile and buildstamp from aging out of a /tmp runtime dir
     // (see `PidfileLock::refresh`).
